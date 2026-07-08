@@ -1,7 +1,9 @@
 import type { FileTreeIcons } from '../iconConfig';
 import type { GitStatus } from '../publicTypes';
 import type {
+  FileTreeColumn,
   FileTreeCompositionOptions,
+  FileTreeItemMetadata,
   FileTreePublicId,
   FileTreeRenderOptions,
   FileTreeRowDecorationRenderer,
@@ -51,10 +53,12 @@ export interface FileTreeViewProps extends Omit<
   FileTreeRenderOptions,
   'initialVisibleRowCount'
 > {
+  columns?: readonly FileTreeColumn[];
   composition?: FileTreeCompositionOptions;
   controller: import('./FileTreeController').FileTreeController;
   directoriesWithGitChanges?: ReadonlySet<FileTreePublicId>;
   gitStatusByPath?: ReadonlyMap<FileTreePublicId, GitStatus>;
+  metadataByPath?: ReadonlyMap<FileTreePublicId, FileTreeItemMetadata>;
   ignoredGitDirectories?: ReadonlySet<FileTreePublicId>;
   icons?: FileTreeIcons;
   // First-render viewport height in CSS pixels, used as the fallback when the

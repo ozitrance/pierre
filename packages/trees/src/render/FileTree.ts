@@ -27,13 +27,21 @@ import {
   resolveFileTreeGitStatusState,
 } from '../model/gitStatus';
 import type { FileTreeViewProps } from '../model/internalTypes';
+import {
+  applyFileTreeMetadataPatch,
+  type FileTreeMetadataState,
+  resolveFileTreeMetadataState,
+} from '../model/metadata';
 import type {
   FileTreeBatchOperation,
+  FileTreeBreadcrumb,
+  FileTreeColumn,
   FileTreeCompositionOptions,
   FileTreeGitStatusPatch,
   FileTreeHydrationProps,
   FileTreeItemHandle,
   FileTreeListener,
+  FileTreeMetadataPatch,
   FileTreeMoveOptions,
   FileTreeMutationEventForType,
   FileTreeMutationEventType,
@@ -49,6 +57,7 @@ import type {
   FileTreeSearchSessionHandle,
   FileTreeSelectionChangeListener,
   FileTreeSsrPayload,
+  FileTreeViewMode,
 } from '../model/publicTypes';
 import {
   FILE_TREE_DEFAULT_ITEM_HEIGHT,
@@ -176,9 +185,11 @@ export class FileTree
 {
   static LoadedCustomComponent: boolean = FileTreeContainerLoaded;
 
+  #columns: readonly FileTreeColumn[] | undefined;
   #composition: FileTreeCompositionOptions | undefined;
   readonly #controller: FileTreeController;
   #id: string;
+  #metadataState: FileTreeMetadataState | null;
   readonly #onSelectionChange: FileTreeSelectionChangeListener | undefined;
   readonly #renderRowDecoration: FileTreeRowDecorationRenderer | undefined;
   readonly #renamingEnabled: boolean;
@@ -210,6 +221,7 @@ export class FileTree
 
   public constructor(options: FileTreeOptions) {
     const {
+      columns,
       composition,
       density,
       fileTreeSearchMode,
@@ -218,6 +230,7 @@ export class FileTree
       initialSearchQuery,
       icons,
       itemHeight,
+      metadata,
       onSearchChange,
       onSelectionChange,
       overscan,
@@ -231,9 +244,11 @@ export class FileTree
       initialVisibleRowCount,
       ...controllerOptions
     } = options;
+    this.#columns = columns;
     this.#composition = composition;
     this.#id = createClientId(id);
     this.#gitStatusState = resolveFileTreeGitStatusState(gitStatus);
+    this.#metadataState = resolveFileTreeMetadataState(metadata);
     this.#icons = icons;
     this.#unsafeCSS = unsafeCSS;
     this.#onSelectionChange = onSelectionChange;
@@ -432,6 +447,80 @@ export class FileTree
     return this.#controller.startRenaming(path, options);
   }
 
+  public getViewMode(): FileTreeViewMode {
+    return this.#controller.getViewMode();
+  }
+
+  public setViewMode(mode: FileTreeViewMode): void {
+    this.#controller.setViewMode(mode);
+  }
+
+  public getExplorerDirectoryPath(): string {
+    return this.#controller.getExplorerDirectoryPath();
+  }
+
+  public getExplorerBreadcrumbs(): readonly FileTreeBreadcrumb[] {
+    return this.#controller.getExplorerBreadcrumbs();
+  }
+
+  public canNavigateUp(): boolean {
+    return this.#controller.canNavigateUp();
+  }
+
+  public canNavigateBack(): boolean {
+    return this.#controller.canNavigateBack();
+  }
+
+  public navigateToDirectory(path: FileTreePublicId): boolean {
+    return this.#controller.navigateToDirectory(path);
+  }
+
+  public navigateUp(): boolean {
+    return this.#controller.navigateUp();
+  }
+
+  public navigateBack(): boolean {
+    return this.#controller.navigateBack();
+  }
+
+  public openFocusedItem(): boolean {
+    return this.#controller.openFocusedItem();
+  }
+
+  public getColumns(): readonly FileTreeColumn[] | undefined {
+    return this.#columns;
+  }
+
+  public setColumns(columns?: readonly FileTreeColumn[]): void {
+    this.#columns = columns;
+    this.#rerenderMountedTree();
+  }
+
+  /** Replaces all item metadata; pass undefined to clear the lane's data. */
+  public setMetadata(metadata?: FileTreeOptions['metadata']): void {
+    const nextMetadataState = resolveFileTreeMetadataState(metadata);
+    if (nextMetadataState === this.#metadataState) {
+      return;
+    }
+
+    this.#metadataState = nextMetadataState;
+    this.#rerenderMountedTree();
+  }
+
+  /** Incrementally sets/removes item metadata without resending everything. */
+  public applyMetadataPatch(patch: FileTreeMetadataPatch): void {
+    const nextMetadataState = applyFileTreeMetadataPatch(
+      this.#metadataState,
+      patch
+    );
+    if (nextMetadataState === this.#metadataState) {
+      return;
+    }
+
+    this.#metadataState = nextMetadataState;
+    this.#rerenderMountedTree();
+  }
+
   public remove(path: string, options?: FileTreeRemoveOptions): void {
     this.#controller.remove(path, options);
   }
@@ -539,12 +628,14 @@ export class FileTree
 
   #getViewProps(): FileTreeViewProps {
     return {
+      columns: this.#columns,
       composition: this.#composition,
       controller: this.#controller,
       gitStatusByPath: this.#gitStatusState?.statusByPath,
       ignoredGitDirectories: this.#gitStatusState?.ignoredDirectoryPaths,
       directoriesWithGitChanges: this.#gitStatusState?.directoriesWithChanges,
       icons: this.#icons,
+      metadataByPath: this.#metadataState?.metadataByPath,
       instanceId: this.#id,
       renamingEnabled: this.#renamingEnabled,
       renderRowDecoration: this.#renderRowDecoration,
@@ -568,6 +659,17 @@ export class FileTree
     }
 
     return { host, wrapper };
+  }
+
+  // Repaints the mounted view after a view-level state setter (columns,
+  // metadata); a no-op before render()/hydrate().
+  #rerenderMountedTree(): void {
+    const mountedTree = this.#getMountedTreeElements();
+    if (mountedTree == null) {
+      return;
+    }
+
+    renderFileTreeRoot(mountedTree.wrapper, this.#getViewProps());
   }
 
   #syncIconSurface(host: HTMLElement, wrapper: HTMLElement): void {
@@ -823,6 +925,7 @@ export class FileTree
 
 export function preloadFileTree(options: FileTreeOptions): FileTreeSsrPayload {
   const {
+    columns,
     composition,
     density,
     fileTreeSearchMode,
@@ -831,6 +934,7 @@ export function preloadFileTree(options: FileTreeOptions): FileTreeSsrPayload {
     initialSearchQuery,
     icons,
     itemHeight,
+    metadata,
     onSearchChange: _onSearchChange,
     onSelectionChange: _onSelectionChange,
     overscan,
@@ -854,6 +958,7 @@ export function preloadFileTree(options: FileTreeOptions): FileTreeSsrPayload {
     renaming,
   });
   const gitStatusState = resolveFileTreeGitStatusState(gitStatus);
+  const metadataState = resolveFileTreeMetadataState(metadata);
   const initialViewportHeight = resolveInitialViewportHeight({
     initialVisibleRowCount,
     itemHeight: resolvedItemHeight,
@@ -874,12 +979,14 @@ export function preloadFileTree(options: FileTreeOptions): FileTreeSsrPayload {
 
   const bodyHtml = renderToString(
     h(FileTreeView, {
+      columns,
       composition,
       controller,
       gitStatusByPath: gitStatusState?.statusByPath,
       ignoredGitDirectories: gitStatusState?.ignoredDirectoryPaths,
       directoriesWithGitChanges: gitStatusState?.directoriesWithChanges,
       icons,
+      metadataByPath: metadataState?.metadataByPath,
       instanceId: resolvedId,
       itemHeight: resolvedItemHeight,
       overscan,

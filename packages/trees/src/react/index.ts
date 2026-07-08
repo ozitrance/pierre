@@ -14,3 +14,7 @@ export {
   useFileTreeSearch,
   type FileTreeSearchState,
 } from './useFileTreeSearch';
+export {
+  useFileTreeExplorer,
+  type FileTreeExplorerState,
+} from './useFileTreeExplorer';

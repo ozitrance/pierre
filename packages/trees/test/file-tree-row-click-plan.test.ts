@@ -16,6 +16,7 @@ describe('computeFileTreeRowClickPlan', () => {
   test('plain click on a file selects only that path and does not toggle', () => {
     expect(computeFileTreeRowClickPlan(baseInput)).toEqual({
       closeSearch: false,
+      openTarget: false,
       revealCanonical: false,
       selection: { kind: 'single' },
       toggleDirectory: false,
@@ -27,6 +28,7 @@ describe('computeFileTreeRowClickPlan', () => {
       computeFileTreeRowClickPlan({ ...baseInput, isDirectory: true })
     ).toEqual({
       closeSearch: false,
+      openTarget: false,
       revealCanonical: false,
       selection: { kind: 'single' },
       toggleDirectory: true,
@@ -42,6 +44,7 @@ describe('computeFileTreeRowClickPlan', () => {
       })
     ).toEqual({
       closeSearch: false,
+      openTarget: false,
       revealCanonical: false,
       selection: { additive: false, kind: 'range' },
       toggleDirectory: false,
@@ -56,6 +59,7 @@ describe('computeFileTreeRowClickPlan', () => {
       })
     ).toEqual({
       closeSearch: false,
+      openTarget: false,
       revealCanonical: false,
       selection: { additive: true, kind: 'range' },
       toggleDirectory: false,
@@ -80,6 +84,7 @@ describe('computeFileTreeRowClickPlan', () => {
       })
     ).toEqual({
       closeSearch: false,
+      openTarget: false,
       revealCanonical: false,
       selection: { kind: 'toggle' },
       toggleDirectory: false,
@@ -138,6 +143,68 @@ describe('computeFileTreeRowClickPlan', () => {
       computeFileTreeRowClickPlan({ ...baseInput, mode: 'flow' })
         .revealCanonical
     ).toBe(false);
+  });
+
+  test('explorer single click selects without toggling or activating', () => {
+    expect(
+      computeFileTreeRowClickPlan({
+        ...baseInput,
+        event: { ctrlKey: false, detail: 1, metaKey: false, shiftKey: false },
+        isDirectory: true,
+        viewMode: 'explorer',
+      })
+    ).toEqual({
+      closeSearch: false,
+      openTarget: false,
+      revealCanonical: false,
+      selection: { kind: 'single' },
+      toggleDirectory: false,
+    });
+  });
+
+  test('explorer double click activates the target', () => {
+    const directoryPlan = computeFileTreeRowClickPlan({
+      ...baseInput,
+      event: { ctrlKey: false, detail: 2, metaKey: false, shiftKey: false },
+      isDirectory: true,
+      viewMode: 'explorer',
+    });
+    const filePlan = computeFileTreeRowClickPlan({
+      ...baseInput,
+      event: { ctrlKey: false, detail: 2, metaKey: false, shiftKey: false },
+      viewMode: 'explorer',
+    });
+    expect(directoryPlan.openTarget).toBe(true);
+    expect(directoryPlan.toggleDirectory).toBe(false);
+    expect(filePlan.openTarget).toBe(true);
+  });
+
+  test('explorer double click with a modifier never activates', () => {
+    const plan = computeFileTreeRowClickPlan({
+      ...baseInput,
+      event: { ctrlKey: true, detail: 2, metaKey: false, shiftKey: false },
+      isDirectory: true,
+      viewMode: 'explorer',
+    });
+    expect(plan.openTarget).toBe(false);
+    expect(plan.selection).toEqual({ kind: 'toggle' });
+  });
+
+  test('explorer keeps an open search filter on single click, closes on activation', () => {
+    const single = computeFileTreeRowClickPlan({
+      ...baseInput,
+      event: { ctrlKey: false, detail: 1, metaKey: false, shiftKey: false },
+      isSearchOpen: true,
+      viewMode: 'explorer',
+    });
+    const activation = computeFileTreeRowClickPlan({
+      ...baseInput,
+      event: { ctrlKey: false, detail: 2, metaKey: false, shiftKey: false },
+      isSearchOpen: true,
+      viewMode: 'explorer',
+    });
+    expect(single.closeSearch).toBe(false);
+    expect(activation.closeSearch).toBe(true);
   });
 
   test('toggleDirectory is false whenever any modifier is held, even on a directory', () => {

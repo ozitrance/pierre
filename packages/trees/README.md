@@ -47,6 +47,67 @@ Common model methods include:
   `tree.scrollToPath(path, { focus: false })`
 - `tree.cleanUp()`
 
+## Explorer mode
+
+Next to the classic tree, `viewMode: 'explorer'` presents one directory at a
+time as a flat listing, like a terminal file explorer: Enter or double-click
+descends into a directory (or opens a file), the back arrow / Backspace goes up
+one level, Alt+ArrowLeft walks back through the visit history, and a breadcrumb
+bar above the list jumps to any ancestor. Typing filters the current directory.
+The mode can be switched at runtime.
+
+```ts
+const tree = new FileTree({
+  explorer: {
+    onNavigate: (directoryPath) => console.log('now in', directoryPath),
+    onOpenFile: (path) => openInEditor(path),
+  },
+  paths,
+  viewMode: 'explorer',
+});
+
+tree.setViewMode('tree'); // switch back; the focused item stays revealed
+tree.navigateToDirectory('src/components');
+tree.navigateUp();
+tree.navigateBack();
+tree.getExplorerBreadcrumbs(); // [{ name: 'src', path: 'src/' }, …]
+```
+
+React callers get the same state reactively through `useFileTreeExplorer`:
+
+```tsx
+const { model } = useFileTree({ paths, viewMode: 'explorer' });
+const explorer = useFileTreeExplorer(model);
+// explorer.viewMode, explorer.directoryPath, explorer.breadcrumbs,
+// explorer.navigateTo(path), explorer.navigateUp(), explorer.setViewMode(mode)
+```
+
+## Metadata columns
+
+Rows can render right-aligned detail columns — file size, modified time, and a
+last-commit message — from metadata keyed by path. Columns work in both view
+modes and are meant for wide layouts.
+
+```ts
+const tree = new FileTree({
+  columns: [{ kind: 'message' }, { kind: 'size' }, { kind: 'modified' }],
+  metadata: [
+    { path: 'src/index.ts', sizeBytes: 2048, modifiedAt: 1719400000000 },
+    { path: 'src/', commitMessage: 'Refactor store subscriptions', sizeBytes: 52480 },
+  ],
+  paths,
+});
+
+tree.setMetadata(nextEntries); // full replace
+tree.applyMetadataPatch({ set: [...], remove: [...] }); // incremental
+```
+
+Each column kind ships a default formatter (`formatFileSize`,
+`formatModifiedTime` are also exported); pass `format` on a column to override
+the cell text and `width` to override the default cell width. The CSS variables
+`--trees-column-size-width`, `--trees-column-modified-width`, and
+`--trees-column-message-width` adjust the lane from the host.
+
 ## Prepared input
 
 Prepare large or frequently reloaded path lists once, then pass the prepared

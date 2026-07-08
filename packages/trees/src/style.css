@@ -807,8 +807,120 @@
     }
   }
 
-  /* The wrapper for the tree items */
-  [role='tree'] {
+  /* EXPLORER MODE NAVIGATION BAR */
+  [data-file-tree-explorer-bar] {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+    padding-inline: var(--trees-padding-inline);
+    margin-bottom: var(--trees-item-row-gap);
+    font-family: var(--trees-font-family);
+    font-size: var(--trees-font-size);
+  }
+
+  [data-file-tree-explorer-up] {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--trees-row-height);
+    height: var(--trees-row-height);
+    padding: 0;
+    color: inherit;
+    background: none;
+    border: none;
+    border-radius: var(--trees-border-radius);
+    cursor: pointer;
+
+    &:hover:not(:disabled) {
+      background-color: var(--trees-bg-muted);
+    }
+
+    &:disabled {
+      color: var(--trees-fg-muted);
+      opacity: 0.5;
+      cursor: default;
+    }
+
+    &:focus-visible {
+      outline: var(--trees-focus-ring-width) solid var(--trees-focus-ring-color);
+      outline-offset: var(--trees-focus-ring-offset);
+    }
+  }
+
+  /* Chevron pointing left for the "go up one level" affordance. The nested
+   * selectors outweigh the base chevron alignment rules, which also set
+   * `transform`. */
+  [data-file-tree-explorer-up] [data-icon-name='file-tree-icon-chevron'] {
+    &[data-align-capitals='false'],
+    &[data-align-capitals='true'] {
+      transform: rotate(90deg);
+    }
+  }
+
+  [data-file-tree-breadcrumbs] {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  [data-file-tree-breadcrumb] {
+    flex: 0 1 auto;
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    height: var(--trees-row-height);
+    padding: 0 4px;
+    color: var(--trees-fg-muted);
+    font: inherit;
+    background: none;
+    border: none;
+    border-radius: var(--trees-border-radius);
+    cursor: pointer;
+
+    &:hover {
+      color: inherit;
+      background-color: var(--trees-bg-muted);
+    }
+
+    /* The trailing crumb is the current directory, not a navigation target. */
+    &[aria-current='location'] {
+      color: inherit;
+      cursor: default;
+
+      &:hover {
+        background: none;
+      }
+    }
+
+    &:focus-visible {
+      outline: var(--trees-focus-ring-width) solid var(--trees-focus-ring-color);
+      outline-offset: var(--trees-focus-ring-offset);
+    }
+  }
+
+  [data-file-tree-breadcrumb-separator] {
+    flex: 0 0 auto;
+    color: var(--trees-fg-muted);
+    opacity: 0.6;
+    user-select: none;
+  }
+
+  [data-file-tree-explorer-empty] {
+    padding: calc(var(--trees-row-height) / 2) var(--trees-padding-inline);
+    color: var(--trees-fg-muted);
+    font-family: var(--trees-font-family);
+    font-size: var(--trees-font-size);
+    user-select: none;
+  }
+
+  /* The wrapper for the tree items (listbox is the explorer-mode role) */
+  [role='tree'],
+  [role='listbox'] {
     position: relative;
     display: flex;
     flex-direction: column;
@@ -1130,6 +1242,43 @@
     /* white-space: nowrap; */
   }
 
+  /* METADATA COLUMNS
+   * Right-aligned detail cells (size, modified time, commit message). The
+   * lane absorbs the free row width so cells line up as columns; the message
+   * cell is the flexible one and truncates first. */
+  [data-item-section='metadata'] {
+    flex: 1 0 auto;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--trees-item-row-gap);
+    margin-inline-start: auto;
+    color: var(--trees-fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  [data-item-section='metadata'] > span {
+    flex: 0 0 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: end;
+  }
+
+  [data-item-section='metadata'] > [data-item-column='size'] {
+    width: var(--trees-column-size-width, 4.5em);
+  }
+
+  [data-item-section='metadata'] > [data-item-column='modified'] {
+    width: var(--trees-column-modified-width, 6em);
+  }
+
+  [data-item-section='metadata'] > [data-item-column='message'] {
+    flex: 0 1 var(--trees-column-message-width, 22em);
+    text-align: start;
+  }
+
   [data-item-section='decoration'] {
     flex: 1 1 0;
     min-width: 0;
@@ -1201,7 +1350,9 @@
   [data-item-section='content']:has([data-item-rename-input])
     ~ [data-item-section='action'],
   [data-item-section='content']:has([data-item-rename-input])
-    ~ [data-item-section='decoration'] {
+    ~ [data-item-section='decoration'],
+  [data-item-section='content']:has([data-item-rename-input])
+    ~ [data-item-section='metadata'] {
     display: none;
   }
 

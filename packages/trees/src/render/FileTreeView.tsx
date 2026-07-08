@@ -32,6 +32,7 @@ import {
   type FileTreeLayoutStickyRow,
 } from '../model/layout';
 import type {
+  FileTreeColumn,
   FileTreeContextMenuButtonVisibility,
   FileTreeContextMenuItem,
   FileTreeContextMenuOpenContext,
@@ -39,7 +40,9 @@ import type {
   FileTreeDirectoryHandle,
   FileTreeDropTarget,
   FileTreeItemHandle,
+  FileTreeItemMetadata,
   FileTreeRowDecoration,
+  FileTreeViewMode,
   FileTreeVisibleRow,
 } from '../model/publicTypes';
 import {
@@ -54,6 +57,10 @@ import {
   GIT_STATUS_LABEL,
   GIT_STATUS_TITLE,
 } from '../utils/gitStatusPresentation';
+import {
+  formatMetadataColumn,
+  getMetadataColumnTitle,
+} from '../utils/metadataPresentation';
 import { shouldBumpControllerRevision } from './controllerSnapshotSubscription';
 import {
   focusElement,
@@ -511,6 +518,16 @@ function isContextMenuOpenKey(event: KeyboardEvent): boolean {
   return (event.shiftKey && event.key === 'F10') || event.key === 'ContextMenu';
 }
 
+// Explorer-bar buttons (up, breadcrumbs) own their keyboard behavior; row
+// navigation keys must not hijack Enter/Space aimed at them.
+function isEventFromExplorerBar(event: Event): boolean {
+  const target = event.target;
+  return (
+    target instanceof HTMLElement &&
+    target.closest('[data-file-tree-explorer-bar]') != null
+  );
+}
+
 // Sticky DOM reads are only needed for keys whose behavior depends on the
 // current focused row. This keeps ordinary keydowns out of the query/measure
 // path while preserving stale-DOM-focus repair for sticky keyboard actions.
@@ -825,25 +842,68 @@ function focusFirstMenuElement(menuElement: HTMLElement | null): void {
   focusElement(focusable ?? menuElement);
 }
 
+// Renders the fixed-width metadata cells configured through `columns`. The
+// format context is built once per row and shared by every cell.
+function renderMetadataCells(
+  row: FileTreeVisibleRow,
+  targetPath: string,
+  columns: readonly FileTreeColumn[],
+  metadata: FileTreeItemMetadata | null
+): JSX.Element {
+  const formatContext = {
+    item: createContextMenuItem(row, targetPath),
+    metadata,
+  };
+
+  return (
+    <div data-item-section="metadata">
+      {columns.map((column, columnIndex) => {
+        const cellStyle =
+          column.width == null
+            ? undefined
+            : { flexBasis: column.width, width: column.width };
+        return (
+          <span
+            key={columnIndex}
+            data-item-column={column.kind}
+            style={cellStyle}
+            title={getMetadataColumnTitle(column, formatContext)}
+          >
+            {formatMetadataColumn(column, formatContext)}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function renderFileTreeRowContent(
   row: FileTreeVisibleRow,
   resolveIcon: ReturnType<typeof createFileTreeIconResolver>['resolveIcon'],
   {
     actionLaneEnabled = false,
+    columns = null,
     customDecoration = null,
     decorationLaneEnabled = false,
+    // Explorer rows never expand in place, so they swap the expansion chevron
+    // for a folder glyph.
+    directoryIconName = 'file-tree-icon-chevron',
     dragTargetFlattenedSegmentPath = null,
     gitDecoration = null,
     gitLaneActive = false,
+    metadata = null,
     renameInput = null,
     showDecorativeActionAffordance = false,
   }: {
     actionLaneEnabled?: boolean;
+    columns?: readonly FileTreeColumn[] | null;
     customDecoration?: FileTreeRowDecoration | null;
     decorationLaneEnabled?: boolean;
+    directoryIconName?: SVGSpriteNames;
     dragTargetFlattenedSegmentPath?: string | null;
     gitDecoration?: FileTreeRowDecoration | null;
     gitLaneActive?: boolean;
+    metadata?: FileTreeItemMetadata | null;
     renameInput?: JSX.Element | null;
     showDecorativeActionAffordance?: boolean;
   } = {}
@@ -865,7 +925,7 @@ function renderFileTreeRowContent(
       ) : null}
       <div data-item-section="icon">
         {row.kind === 'directory' ? (
-          <Icon {...resolveIcon('file-tree-icon-chevron')} />
+          <Icon {...resolveIcon(directoryIconName)} />
         ) : (
           <Icon {...resolveIcon('file-tree-icon-file', targetPath)} />
         )}
@@ -883,6 +943,9 @@ function renderFileTreeRowContent(
               </MiddleTruncate>
             ))}
       </div>
+      {columns != null && columns.length > 0
+        ? renderMetadataCells(row, targetPath, columns, metadata)
+        : null}
       {decorationLaneEnabled ? (
         <div data-item-section="decoration">
           {customDecoration != null
@@ -917,8 +980,11 @@ type FileTreeRenderedRowMode = FileTreeRowClickMode;
 // flow paths can share the same logical invariants by passing in a frame
 // with a different `registerButton` target.
 type FileTreeRenderRowFrame = {
+  columns: readonly FileTreeColumn[] | undefined;
   controller: FileTreeController;
+  metadataByPath: ReadonlyMap<string, FileTreeItemMetadata> | undefined;
   renameView: ReturnType<FileTreeController[typeof FILE_TREE_RENAME_VIEW]>;
+  viewMode: FileTreeViewMode;
   visualFocusPath: string | null;
   contextHoverPath: string | null;
   draggedPathSet: ReadonlySet<string> | null;
@@ -987,8 +1053,11 @@ function renderStyledRow(
   options: FileTreeRenderRowOptions = {}
 ): JSX.Element {
   const {
+    columns,
     controller,
+    metadataByPath,
     renameView,
+    viewMode,
     visualFocusPath,
     contextHoverPath,
     draggedPathSet,
@@ -1063,11 +1132,17 @@ function renderStyledRow(
     );
   const rowContent = renderFileTreeRowContent(row, resolveIcon, {
     actionLaneEnabled,
+    columns,
     customDecoration,
     decorationLaneEnabled,
+    directoryIconName:
+      viewMode === 'explorer'
+        ? 'file-tree-icon-folder'
+        : 'file-tree-icon-chevron',
     dragTargetFlattenedSegmentPath: dragTarget?.flattenedSegmentPath ?? null,
     gitDecoration,
     gitLaneActive,
+    metadata: metadataByPath?.get(targetPath) ?? null,
     renameInput,
     showDecorativeActionAffordance,
   });
@@ -1077,6 +1152,7 @@ function renderStyledRow(
       ? getFileTreeFocusedRowDomId(instanceId, targetPath, isParked)
       : undefined,
     extraStyle: style,
+    viewMode,
     features: {
       actionLaneEnabled,
       contextMenuButtonVisibility: actionLaneEnabled
@@ -1212,6 +1288,7 @@ function renderRangeChildren(
 }
 
 export function FileTreeView({
+  columns,
   composition,
   controller,
   gitStatusByPath,
@@ -1219,6 +1296,7 @@ export function FileTreeView({
   directoriesWithGitChanges,
   icons,
   instanceId,
+  metadataByPath,
   itemHeight = FILE_TREE_DEFAULT_ITEM_HEIGHT,
   overscan = FILE_TREE_DEFAULT_OVERSCAN,
   renamingEnabled = false,
@@ -1498,6 +1576,11 @@ export function FileTreeView({
   const searchValue = controller.getSearchValue();
   const focusedPath = controller.getFocusedPath();
   const focusedIndex = controller.getFocusedIndex();
+  const viewMode = controller.getViewMode();
+  const isExplorerMode = viewMode === 'explorer';
+  const explorerBreadcrumbs = isExplorerMode
+    ? controller.getExplorerBreadcrumbs()
+    : null;
   const scrollRequest = controller.getScrollRequest();
   const dragAndDropEnabled = controller.isDragAndDropEnabled();
   const dragSession = controller.getDragSession();
@@ -2151,6 +2234,10 @@ export function FileTreeView({
   };
 
   const handleTreeKeyDown = (event: KeyboardEvent): void => {
+    if (isExplorerMode && isEventFromExplorerBar(event)) {
+      return;
+    }
+
     if (contextMenuState != null) {
       if (event.key === 'Escape') {
         closeContextMenu();
@@ -2344,7 +2431,12 @@ export function FileTreeView({
       event.key.toLowerCase() === 'a'
     ) {
       controller.selectAllVisiblePaths();
+    } else if (isExplorerMode && event.altKey && event.key === 'ArrowLeft') {
+      handled = controller.navigateBack();
     } else {
+      // Explorer mode swaps expansion keys for navigation: Enter/ArrowRight
+      // descends into the focused directory (Enter also opens files),
+      // ArrowLeft/Backspace goes up one level.
       switch (event.key) {
         case 'ArrowDown':
           controller.focusNextItem();
@@ -2353,7 +2445,10 @@ export function FileTreeView({
           controller.focusPreviousItem();
           break;
         case 'ArrowRight':
-          if (
+          if (isExplorerMode) {
+            handled =
+              focusedDirectoryItem != null && controller.openFocusedItem();
+          } else if (
             focusedDirectoryItem == null ||
             focusedDirectoryItem.isExpanded()
           ) {
@@ -2363,7 +2458,9 @@ export function FileTreeView({
           }
           break;
         case 'ArrowLeft':
-          if (
+          if (isExplorerMode) {
+            handled = controller.navigateUp();
+          } else if (
             focusedDirectoryItem != null &&
             focusedDirectoryItem.isExpanded()
           ) {
@@ -2371,6 +2468,12 @@ export function FileTreeView({
           } else {
             controller.focusParentItem();
           }
+          break;
+        case 'Backspace':
+          handled = isExplorerMode && controller.navigateUp();
+          break;
+        case 'Enter':
+          handled = isExplorerMode && controller.openFocusedItem();
           break;
         case 'Home':
           controller.focusFirstItem();
@@ -3526,12 +3629,14 @@ export function FileTreeView({
       const plan = computeFileTreeRowClickPlan({
         event: {
           ctrlKey: event.ctrlKey,
+          detail: event.detail,
           metaKey: event.metaKey,
           shiftKey: event.shiftKey,
         },
         isDirectory: row.kind === 'directory',
         isSearchOpen,
         mode,
+        viewMode,
       });
 
       const shouldToggleDirectory =
@@ -3581,6 +3686,9 @@ export function FileTreeView({
       if (plan.closeSearch) {
         controller.closeSearch();
       }
+      if (plan.openTarget) {
+        controller.openMountedPathFromInput(actionTargetPath);
+      }
       if (plan.revealCanonical) {
         revealCanonicalRowAtStickyOffset(actionTargetPath, {
           targetOffset: 'sticky-parents',
@@ -3593,6 +3701,7 @@ export function FileTreeView({
       layoutSnapshot.visible.endIndex,
       layoutSnapshot.visible.startIndex,
       revealCanonicalRowAtStickyOffset,
+      viewMode,
     ]
   );
 
@@ -3633,6 +3742,7 @@ export function FileTreeView({
   // for where each ref is registered, which is the invariant sticky reuse
   // depends on.
   const flowRowFrame: FileTreeRenderRowFrame = {
+    columns,
     contextHoverPath: visualContextHoverPath,
     contextMenuButtonTriggerEnabled,
     contextMenuButtonVisibility,
@@ -3640,6 +3750,8 @@ export function FileTreeView({
     contextMenuRightClickEnabled,
     contextMenuTriggerMode,
     controller,
+    metadataByPath,
+    viewMode,
     directoriesWithGitChanges,
     dragAndDropEnabled,
     draggedPathSet,
@@ -3687,6 +3799,10 @@ export function FileTreeView({
           : undefined
       }
       data-file-tree-has-git-lane={gitLaneActive ? 'true' : undefined}
+      data-file-tree-has-metadata-lane={
+        columns != null && columns.length > 0 ? 'true' : undefined
+      }
+      data-file-tree-view-mode={viewMode}
       data-file-tree-virtualized-root="true"
       onDragLeave={dragAndDropEnabled ? handleTreeDragLeave : undefined}
       onDragOver={dragAndDropEnabled ? handleTreeDragOver : undefined}
@@ -3694,7 +3810,7 @@ export function FileTreeView({
       onKeyDown={handleTreeKeyDown}
       onPointerLeave={contextMenuEnabled ? handleTreePointerLeave : undefined}
       onPointerOver={contextMenuEnabled ? handleTreePointerOver : undefined}
-      role="tree"
+      role={isExplorerMode ? 'listbox' : 'tree'}
       tabIndex={-1}
       style={{
         outline: 'none',
@@ -3706,6 +3822,60 @@ export function FileTreeView({
         dangerouslySetInnerHTML={{ __html: guideStyleText }}
       />
       <slot name={HEADER_SLOT_NAME} data-type="header-slot" />
+      {isExplorerMode ? (
+        <div data-file-tree-explorer-bar="true">
+          <button
+            type="button"
+            data-file-tree-explorer-up="true"
+            aria-label="Go to parent directory"
+            disabled={!controller.canNavigateUp()}
+            onClick={() => {
+              controller.navigateUp();
+            }}
+          >
+            <Icon {...resolveIcon('file-tree-icon-chevron')} />
+          </button>
+          <nav aria-label="Current directory" data-file-tree-breadcrumbs="true">
+            <button
+              type="button"
+              data-file-tree-breadcrumb="true"
+              aria-current={
+                explorerBreadcrumbs?.length === 0 ? 'location' : undefined
+              }
+              onClick={() => {
+                controller.navigateToDirectory('');
+              }}
+            >
+              /
+            </button>
+            {explorerBreadcrumbs?.map((breadcrumb, breadcrumbIndex) => {
+              const isCurrentDirectory =
+                breadcrumbIndex === explorerBreadcrumbs.length - 1;
+              return (
+                <Fragment key={breadcrumb.path}>
+                  <span aria-hidden="true" data-file-tree-breadcrumb-separator>
+                    /
+                  </span>
+                  <button
+                    type="button"
+                    data-file-tree-breadcrumb="true"
+                    aria-current={isCurrentDirectory ? 'location' : undefined}
+                    onClick={
+                      isCurrentDirectory
+                        ? undefined
+                        : () => {
+                            controller.navigateToDirectory(breadcrumb.path);
+                          }
+                    }
+                  >
+                    <Truncate>{breadcrumb.name}</Truncate>
+                  </button>
+                </Fragment>
+              );
+            })}
+          </nav>
+        </div>
+      ) : null}
       {searchEnabled ? (
         <div
           data-file-tree-search-container
@@ -3746,6 +3916,13 @@ export function FileTreeView({
         </div>
       ) : null}
       <div ref={scrollRef} data-file-tree-virtualized-scroll="true">
+        {isExplorerMode && layoutSnapshot.physical.totalRowCount === 0 ? (
+          <div data-file-tree-explorer-empty="true">
+            {isSearchOpen && searchValue.length > 0
+              ? 'No matches'
+              : 'Empty directory'}
+          </div>
+        ) : null}
         {stickyFolders && hasStickyUiMount && stickyRows.length > 0 ? (
           <div aria-hidden="true" data-file-tree-sticky-overlay="true">
             <div
