@@ -203,6 +203,12 @@ when inserting the full container string through DOM APIs like `innerHTML` or
 `dangerouslySetInnerHTML`. Pass `{ id, shadowHtml }` to the React component as
 `preloadedData`.
 
+Pass the same options to `preloadFileTree()` and the client model — including
+`viewMode` when using explorer mode — so the server markup matches what the
+client hydrates. If the two view modes ever drift, `hydrate()` detects the
+mismatch and swaps in a fresh client render instead of adopting the stale
+markup, but the pre-hydration frames still show whatever the server sent.
+
 ## Styling
 
 The host element and shadow root read CSS variables such as:

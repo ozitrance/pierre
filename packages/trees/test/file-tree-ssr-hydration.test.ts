@@ -321,4 +321,142 @@ describe('file-tree SSR and hydration', () => {
       cleanup();
     }
   });
+
+  test('preloadFileTree renders explorer mode markup for viewMode explorer', async () => {
+    const preloadFileTree = await loadPreloadFileTree();
+
+    const payload = preloadFileTree({
+      initialExpansion: 'open',
+      paths: ['README.md', 'src/index.ts', 'src/lib/utils.ts'],
+      initialVisibleRowCount: 8,
+      viewMode: 'explorer',
+    });
+
+    expect(payload.shadowHtml).toContain('role="listbox"');
+    expect(payload.shadowHtml).toContain('data-file-tree-view-mode="explorer"');
+    expect(payload.shadowHtml).toContain('data-file-tree-explorer-bar');
+    expect(payload.shadowHtml).toContain('#file-tree-icon-folder');
+    // The root listing is flat: the directory row appears, its children don't.
+    expect(payload.shadowHtml).toContain('data-item-path="src/"');
+    expect(payload.shadowHtml).not.toContain('data-item-path="src/index.ts"');
+  });
+
+  test('hydrating an explorer payload with matching options keeps explorer markup', async () => {
+    const { cleanup, dom } = installDom();
+    try {
+      const preloadFileTree = await loadPreloadFileTree();
+      const FileTree = await loadFileTree();
+      const options = {
+        id: 'pst-hydrate-explorer-matched',
+        initialExpansion: 'open',
+        paths: ['README.md', 'src/index.ts', 'src/lib/utils.ts'],
+        initialVisibleRowCount: 8,
+        viewMode: 'explorer',
+      } satisfies ConstructorParameters<typeof FileTree>[0];
+      const payload = preloadFileTree(options);
+      const mount = dom.window.document.createElement('div');
+      mount.innerHTML = serializeFileTreeSsrPayload(payload, 'dom');
+      dom.window.document.body.appendChild(mount);
+      const host = mount.querySelector('file-tree-container');
+      if (!(host instanceof dom.window.HTMLElement)) {
+        throw new Error('expected SSR host');
+      }
+
+      const fileTree = new FileTree(options);
+      fileTree.hydrate({ fileTreeContainer: host });
+      await flushDom();
+
+      const rootElement = host.shadowRoot?.querySelector(
+        '[data-file-tree-virtualized-root]'
+      );
+      expect(rootElement?.getAttribute('role')).toBe('listbox');
+      expect(
+        host.shadowRoot?.querySelector('[data-file-tree-explorer-bar]')
+      ).not.toBeNull();
+
+      fileTree.cleanUp();
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('hydrating a payload from a different view mode falls back to a clean render', async () => {
+    const { cleanup, dom } = installDom();
+    try {
+      const preloadFileTree = await loadPreloadFileTree();
+      const FileTree = await loadFileTree();
+      const baseOptions = {
+        id: 'pst-hydrate-explorer-mismatch',
+        initialExpansion: 'open',
+        paths: ['README.md', 'src/index.ts', 'src/lib/utils.ts'],
+        initialVisibleRowCount: 8,
+      } satisfies ConstructorParameters<typeof FileTree>[0];
+      // Server rendered the default tree mode; the client model starts in
+      // explorer mode. Adopting the tree DOM via hydration would leave the
+      // stale role and missing explorer bar in place, so hydrate() must
+      // detect the drift and render fresh.
+      const payload = preloadFileTree(baseOptions);
+      const mount = dom.window.document.createElement('div');
+      mount.innerHTML = serializeFileTreeSsrPayload(payload, 'dom');
+      dom.window.document.body.appendChild(mount);
+      const host = mount.querySelector('file-tree-container');
+      if (!(host instanceof dom.window.HTMLElement)) {
+        throw new Error('expected SSR host');
+      }
+
+      const fileTree = new FileTree({
+        ...baseOptions,
+        viewMode: 'explorer',
+      });
+      fileTree.hydrate({ fileTreeContainer: host });
+      await flushDom();
+
+      const rootElement = host.shadowRoot?.querySelector(
+        '[data-file-tree-virtualized-root]'
+      );
+      expect(rootElement?.getAttribute('role')).toBe('listbox');
+      expect(rootElement?.getAttribute('data-file-tree-view-mode')).toBe(
+        'explorer'
+      );
+      expect(
+        host.shadowRoot?.querySelector('[data-file-tree-explorer-bar]')
+      ).not.toBeNull();
+      // And the reverse: explorer payload adopted by a tree-mode model.
+      const reversePayload = preloadFileTree({
+        ...baseOptions,
+        id: 'pst-hydrate-tree-mismatch',
+        viewMode: 'explorer',
+      });
+      const reverseMount = dom.window.document.createElement('div');
+      reverseMount.innerHTML = serializeFileTreeSsrPayload(
+        reversePayload,
+        'dom'
+      );
+      dom.window.document.body.appendChild(reverseMount);
+      const reverseHost = reverseMount.querySelector('file-tree-container');
+      if (!(reverseHost instanceof dom.window.HTMLElement)) {
+        throw new Error('expected SSR host');
+      }
+
+      const treeFileTree = new FileTree({
+        ...baseOptions,
+        id: 'pst-hydrate-tree-mismatch',
+      });
+      treeFileTree.hydrate({ fileTreeContainer: reverseHost });
+      await flushDom();
+
+      const reverseRootElement = reverseHost.shadowRoot?.querySelector(
+        '[data-file-tree-virtualized-root]'
+      );
+      expect(reverseRootElement?.getAttribute('role')).toBe('tree');
+      expect(
+        reverseHost.shadowRoot?.querySelector('[data-file-tree-explorer-bar]')
+      ).toBeNull();
+
+      fileTree.cleanUp();
+      treeFileTree.cleanUp();
+    } finally {
+      cleanup();
+    }
+  });
 });

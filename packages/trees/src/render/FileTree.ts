@@ -593,7 +593,34 @@ export class FileTree
     const host = this.#prepareHost(fileTreeContainer);
     const wrapper = this.#getOrCreateWrapper(host);
     this.#syncHeaderSlotContent();
-    hydrateFileTreeRoot(wrapper, this.#getViewProps());
+    if (this.#canHydratePreloadedWrapper(wrapper)) {
+      hydrateFileTreeRoot(wrapper, this.#getViewProps());
+      return;
+    }
+
+    // The preloaded markup was rendered in a different view mode than this
+    // model is configured for. Hydration skips attribute reconciliation, so
+    // adopting that DOM would leave the stale mode (role, explorer bar, row
+    // icons) on screen until an unrelated re-render. Discard the server DOM
+    // and render fresh in one commit instead.
+    wrapper.replaceChildren();
+    renderFileTreeRoot(wrapper, this.#getViewProps());
+  }
+
+  // A preloaded wrapper is only safe to hydrate when the server rendered the
+  // same view mode the live controller starts in. Payloads that predate the
+  // view-mode attribute could only ever be tree mode.
+  #canHydratePreloadedWrapper(wrapper: HTMLElement): boolean {
+    const preloadedRoot = wrapper.querySelector(
+      '[data-file-tree-virtualized-root]'
+    );
+    if (preloadedRoot == null) {
+      return true;
+    }
+
+    const preloadedViewMode =
+      preloadedRoot.getAttribute('data-file-tree-view-mode') ?? 'tree';
+    return preloadedViewMode === this.#controller.getViewMode();
   }
 
   public render({
