@@ -44,15 +44,38 @@ export type FileTreeInitialExpansion = 'closed' | 'open' | number;
  * How the tree presents its paths. `'tree'` is the classic expandable
  * hierarchy. `'explorer'` shows one directory at a time as a flat listing —
  * Enter or double-click descends into a directory, back/up returns to the
- * parent — like a terminal file explorer. The mode can be switched at runtime
- * with `setViewMode()`.
+ * parent — like a terminal file explorer. `'columns'` is a Miller-column
+ * layout over the same navigation state: the explorer listing plus one pane
+ * per ancestor directory and a preview pane for the focused directory, like
+ * the macOS Finder columns view. The mode can be switched at runtime with
+ * `setViewMode()`.
  */
-export type FileTreeViewMode = 'tree' | 'explorer';
+export type FileTreeViewMode = 'tree' | 'explorer' | 'columns';
 
 /** One segment of the explorer-mode current directory, root excluded. */
 export interface FileTreeBreadcrumb {
   name: string;
   path: FileTreePublicId;
+}
+
+/**
+ * One pane of the columns view, left to right: `'ancestor'` panes list each
+ * directory on the current chain (starting at the root), the `'active'` pane
+ * is the explorer listing itself, and the optional `'preview'` pane lists the
+ * children of the focused directory row.
+ */
+export interface FileTreeExplorerColumn {
+  // Canonical directory this pane lists; '' is the root.
+  directoryPath: FileTreePublicId;
+  kind: 'ancestor' | 'active' | 'preview';
+  // Directory basename; '' for the root pane.
+  name: string;
+  rowCount: number;
+  // Position of the chain child inside an ancestor pane's listing (the
+  // directory the next pane descends into); -1 for active/preview panes.
+  selectedIndex: number;
+  // Canonical path of that chain child; null for active/preview panes.
+  selectedPath: FileTreePublicId | null;
 }
 
 export interface FileTreeExplorerConfig {
@@ -174,6 +197,10 @@ export interface FileTreeFileHandle extends FileTreeItemHandleBase {
 export type FileTreeItemHandle = FileTreeDirectoryHandle | FileTreeFileHandle;
 
 export interface FileTreeRenderOptions {
+  // Whether columns-view directory rows render a trailing chevron next to
+  // their name pointing at the next pane. Only read in 'columns' view mode.
+  // Defaults to true.
+  columnsDescendAffordance?: boolean;
   // Hint how many rows should fit in the first render before the browser can
   // measure the real scroll viewport. Fractional values are allowed when the
   // desired first-render budget is not an exact multiple of itemHeight.

@@ -207,6 +207,30 @@ describe('computeFileTreeRowClickPlan', () => {
     expect(activation.closeSearch).toBe(true);
   });
 
+  test('columns mode active-pane clicks follow explorer semantics', () => {
+    const single = computeFileTreeRowClickPlan({
+      ...baseInput,
+      event: { ctrlKey: false, detail: 1, metaKey: false, shiftKey: false },
+      isDirectory: true,
+      viewMode: 'columns',
+    });
+    const activation = computeFileTreeRowClickPlan({
+      ...baseInput,
+      event: { ctrlKey: false, detail: 2, metaKey: false, shiftKey: false },
+      isDirectory: true,
+      viewMode: 'columns',
+    });
+    expect(single).toEqual({
+      closeSearch: false,
+      openTarget: false,
+      revealCanonical: false,
+      selection: { kind: 'single' },
+      toggleDirectory: false,
+    });
+    expect(activation.openTarget).toBe(true);
+    expect(activation.toggleDirectory).toBe(false);
+  });
+
   test('toggleDirectory is false whenever any modifier is held, even on a directory', () => {
     const modifiers: Array<FileTreeRowClickPlanInput['event']> = [
       { ctrlKey: true, metaKey: false, shiftKey: false },

@@ -57,6 +57,7 @@ export type {
   FileTreeDropContext,
   FileTreeDropResult,
   FileTreeDropTarget,
+  FileTreeExplorerColumn,
   FileTreeExplorerConfig,
   FileTreeFileHandle,
   FileTreeGitStatusPatch,

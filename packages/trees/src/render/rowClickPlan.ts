@@ -37,7 +37,9 @@ export function computeFileTreeRowClickPlan(
   input: FileTreeRowClickPlanInput
 ): FileTreeRowClickPlan {
   const { event, mode, isSearchOpen, isDirectory } = input;
-  const isExplorer = input.viewMode === 'explorer';
+  // The columns view keeps explorer click semantics in its active pane.
+  const isExplorer =
+    input.viewMode === 'explorer' || input.viewMode === 'columns';
   const additive = event.ctrlKey || event.metaKey;
   const hasModifier = event.shiftKey || additive;
 

@@ -39,6 +39,7 @@ import type {
   FileTreeContextMenuTriggerMode,
   FileTreeDirectoryHandle,
   FileTreeDropTarget,
+  FileTreeExplorerColumn,
   FileTreeItemHandle,
   FileTreeItemMetadata,
   FileTreeRowDecoration,
@@ -46,9 +47,12 @@ import type {
   FileTreeVisibleRow,
 } from '../model/publicTypes';
 import {
+  computeWindowRange,
+  EMPTY_RANGE,
   FILE_TREE_DEFAULT_ITEM_HEIGHT,
   FILE_TREE_DEFAULT_OVERSCAN,
   FILE_TREE_DEFAULT_VIEWPORT_HEIGHT,
+  rangesEqual,
 } from '../model/virtualization';
 import type { GitStatus } from '../publicTypes';
 import type { SVGSpriteNames } from '../sprite';
@@ -894,6 +898,10 @@ function renderFileTreeRowContent(
     metadata = null,
     renameInput = null,
     showDecorativeActionAffordance = false,
+    // Columns-view directories carry a trailing chevron pointing at the next
+    // pane. Every pane renders it (active included) so row layout stays
+    // identical as panes change roles during navigation.
+    showDescendAffordance = false,
   }: {
     actionLaneEnabled?: boolean;
     columns?: readonly FileTreeColumn[] | null;
@@ -906,6 +914,7 @@ function renderFileTreeRowContent(
     metadata?: FileTreeItemMetadata | null;
     renameInput?: JSX.Element | null;
     showDecorativeActionAffordance?: boolean;
+    showDescendAffordance?: boolean;
   } = {}
 ): JSX.Element {
   const targetPath = getFileTreeRowPath(row);
@@ -967,6 +976,11 @@ function renderFileTreeRowContent(
           ) : null}
         </div>
       ) : null}
+      {showDescendAffordance && row.kind === 'directory' ? (
+        <span aria-hidden="true" data-item-column-descend="true">
+          <Icon {...resolveIcon('file-tree-icon-chevron')} />
+        </span>
+      ) : null}
     </Fragment>
   );
 }
@@ -984,6 +998,7 @@ type FileTreeRenderRowFrame = {
   controller: FileTreeController;
   metadataByPath: ReadonlyMap<string, FileTreeItemMetadata> | undefined;
   renameView: ReturnType<FileTreeController[typeof FILE_TREE_RENAME_VIEW]>;
+  showDescendAffordance: boolean;
   viewMode: FileTreeViewMode;
   visualFocusPath: string | null;
   contextHoverPath: string | null;
@@ -1057,6 +1072,7 @@ function renderStyledRow(
     controller,
     metadataByPath,
     renameView,
+    showDescendAffordance,
     viewMode,
     visualFocusPath,
     contextHoverPath,
@@ -1136,15 +1152,14 @@ function renderStyledRow(
     customDecoration,
     decorationLaneEnabled,
     directoryIconName:
-      viewMode === 'explorer'
-        ? 'file-tree-icon-folder'
-        : 'file-tree-icon-chevron',
+      viewMode !== 'tree' ? 'file-tree-icon-folder' : 'file-tree-icon-chevron',
     dragTargetFlattenedSegmentPath: dragTarget?.flattenedSegmentPath ?? null,
     gitDecoration,
     gitLaneActive,
     metadata: metadataByPath?.get(targetPath) ?? null,
     renameInput,
     showDecorativeActionAffordance,
+    showDescendAffordance,
   });
   const attributeProps = computeFileTreeRowElementAttributes({
     ariaLabel: getFileTreeRowAriaLabel(row),
@@ -1287,8 +1302,216 @@ function renderRangeChildren(
     );
 }
 
+// Renders one row of a columns-view side pane: the shared row contract minus
+// drag, rename, and context-menu wiring, plus the ancestor-chain highlight and
+// a descend affordance on directories.
+function renderExplorerColumnRow(
+  row: FileTreeVisibleRow,
+  column: FileTreeExplorerColumn,
+  itemHeight: number,
+  resolveIcon: ReturnType<typeof createFileTreeIconResolver>['resolveIcon'],
+  onRowClick: (event: MouseEvent, row: FileTreeVisibleRow) => void,
+  showDescendAffordance: boolean,
+  key: string | number
+): JSX.Element {
+  const isChainSelected = row.path === column.selectedPath;
+  const attributeProps = computeFileTreeRowElementAttributes({
+    ariaLabel: getFileTreeRowAriaLabel(row),
+    domId: undefined,
+    features: {
+      actionLaneEnabled: false,
+      contextMenuButtonVisibility: null,
+      contextMenuEnabled: false,
+      contextMenuTriggerMode: null,
+      gitLaneActive: false,
+    },
+    isParked: false,
+    itemHeight,
+    mode: 'flow',
+    row,
+    state: {
+      containsGitChange: false,
+      effectiveGitStatus: null,
+      isContextHovered: false,
+      isDragTarget: false,
+      isDragging: false,
+      isFocusRinged: false,
+    },
+    targetPath: row.path,
+    viewMode: 'columns',
+  });
+
+  return (
+    <button
+      {...attributeProps}
+      key={key}
+      type="button"
+      aria-selected={isChainSelected || row.isSelected ? 'true' : 'false'}
+      data-item-chain-selected={isChainSelected ? 'true' : undefined}
+      onClick={(event) => {
+        onRowClick(event, row);
+      }}
+    >
+      {renderFileTreeRowContent(row, resolveIcon, {
+        directoryIconName: 'file-tree-icon-folder',
+        showDescendAffordance,
+      })}
+    </button>
+  );
+}
+
+type FileTreeSideColumnProps = {
+  column: FileTreeExplorerColumn;
+  controller: FileTreeController;
+  initialViewportHeight: number;
+  itemHeight: number;
+  onRowClick: (event: MouseEvent, row: FileTreeVisibleRow) => void;
+  overscan: number;
+  resolveIcon: ReturnType<typeof createFileTreeIconResolver>['resolveIcon'];
+  showDescendAffordance: boolean;
+};
+
+// One ancestor or preview pane of the columns view. Each pane owns its own
+// vertical scroll position and renders an O(window) row slice; the active
+// pane is not one of these — it keeps using the main virtualized list so
+// focus, search, and rename behavior stay unchanged.
+function FileTreeSideColumn({
+  column,
+  controller,
+  initialViewportHeight,
+  itemHeight,
+  onRowClick,
+  overscan,
+  resolveIcon,
+  showDescendAffordance,
+}: FileTreeSideColumnProps): JSX.Element {
+  'use no memo';
+  const scrollElementRef = useRef<HTMLDivElement>(null);
+  const rangeRef = useRef(EMPTY_RANGE);
+  // Re-render trigger only; the render below reads the live scrollTop so a
+  // skipped update (window unchanged) can never pin the pane to a stale slice.
+  const [, setScrollRevision] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(initialViewportHeight);
+
+  useLayoutEffect(() => {
+    const scrollElement = scrollElementRef.current;
+    if (scrollElement == null || typeof ResizeObserver === 'undefined') {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      setViewportHeight(scrollElement.clientHeight);
+    });
+    observer.observe(scrollElement);
+    setViewportHeight(scrollElement.clientHeight);
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
+  // Keep the chain-highlighted row visible when the pane mounts or the chain
+  // moves through it; user scrolling is otherwise left alone.
+  useLayoutEffect(() => {
+    const scrollElement = scrollElementRef.current;
+    if (scrollElement == null || column.selectedIndex < 0) {
+      return;
+    }
+
+    const rowTop = column.selectedIndex * itemHeight;
+    const rowBottom = rowTop + itemHeight;
+    const viewTop = scrollElement.scrollTop;
+    const viewBottom = viewTop + scrollElement.clientHeight;
+    if (rowTop >= viewTop && rowBottom <= viewBottom) {
+      return;
+    }
+
+    scrollElement.scrollTop = Math.max(
+      0,
+      rowTop - Math.max(0, (scrollElement.clientHeight - itemHeight) / 2)
+    );
+    setScrollRevision((revision) => revision + 1);
+  }, [column.directoryPath, column.selectedIndex, itemHeight]);
+
+  const scrollTop = scrollElementRef.current?.scrollTop ?? 0;
+  const range = computeWindowRange(
+    {
+      itemCount: column.rowCount,
+      itemHeight,
+      overscan,
+      scrollTop,
+      viewportHeight,
+    },
+    rangeRef.current
+  );
+  rangeRef.current = range;
+  const rows =
+    range.end < range.start
+      ? []
+      : controller.getExplorerColumnRows(
+          column.directoryPath,
+          range.start,
+          range.end
+        );
+
+  return (
+    <div
+      ref={scrollElementRef}
+      aria-label={column.name.length > 0 ? column.name : '/'}
+      data-file-tree-column={column.kind}
+      role="listbox"
+      onScroll={() => {
+        const scrollElement = scrollElementRef.current;
+        if (scrollElement == null) {
+          return;
+        }
+
+        const nextRange = computeWindowRange(
+          {
+            itemCount: column.rowCount,
+            itemHeight,
+            overscan,
+            scrollTop: scrollElement.scrollTop,
+            viewportHeight,
+          },
+          rangeRef.current
+        );
+        if (!rangesEqual(nextRange, rangeRef.current)) {
+          setScrollRevision((revision) => revision + 1);
+        }
+      }}
+    >
+      {column.rowCount === 0 ? (
+        <div data-file-tree-explorer-empty="true">Empty directory</div>
+      ) : (
+        <div
+          data-file-tree-column-list="true"
+          style={{ height: `${column.rowCount * itemHeight}px` }}
+        >
+          <div
+            aria-hidden="true"
+            data-file-tree-column-offset="true"
+            style={{ height: `${range.start * itemHeight}px` }}
+          />
+          {rows.map((row, slotIndex) =>
+            renderExplorerColumnRow(
+              row,
+              column,
+              itemHeight,
+              resolveIcon,
+              onRowClick,
+              showDescendAffordance,
+              range.start + slotIndex
+            )
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function FileTreeView({
   columns,
+  columnsDescendAffordance = true,
   composition,
   controller,
   gitStatusByPath,
@@ -1315,6 +1538,7 @@ export function FileTreeView({
   const listRef = useRef<HTMLDivElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const columnsWrapRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const rowButtonRefs = useRef(new Map<string, HTMLElement>());
@@ -1578,9 +1802,25 @@ export function FileTreeView({
   const focusedIndex = controller.getFocusedIndex();
   const viewMode = controller.getViewMode();
   const isExplorerMode = viewMode === 'explorer';
-  const explorerBreadcrumbs = isExplorerMode
+  const isColumnsMode = viewMode === 'columns';
+  // 'explorer' and 'columns' share the flat listing, navigation bar, and
+  // keyboard semantics; 'columns' additionally renders the side panes.
+  const isExplorerLike = isExplorerMode || isColumnsMode;
+  const explorerBreadcrumbs = isExplorerLike
     ? controller.getExplorerBreadcrumbs()
     : null;
+  const explorerColumns = isColumnsMode
+    ? controller.getExplorerColumns()
+    : null;
+  const explorerPreviewColumn =
+    explorerColumns?.find((column) => column.kind === 'preview') ?? null;
+  const explorerDirectoryPath = isExplorerLike
+    ? controller.getExplorerDirectoryPath()
+    : '';
+  // Metadata columns assume one wide listing; the columns view is a set of
+  // narrow name-focused panes, so the lane is suppressed there.
+  const metadataColumns = isColumnsMode ? undefined : columns;
+  const descendAffordanceEnabled = isColumnsMode && columnsDescendAffordance;
   const scrollRequest = controller.getScrollRequest();
   const dragAndDropEnabled = controller.isDragAndDropEnabled();
   const dragSession = controller.getDragSession();
@@ -2234,7 +2474,7 @@ export function FileTreeView({
   };
 
   const handleTreeKeyDown = (event: KeyboardEvent): void => {
-    if (isExplorerMode && isEventFromExplorerBar(event)) {
+    if (isExplorerLike && isEventFromExplorerBar(event)) {
       return;
     }
 
@@ -2431,12 +2671,12 @@ export function FileTreeView({
       event.key.toLowerCase() === 'a'
     ) {
       controller.selectAllVisiblePaths();
-    } else if (isExplorerMode && event.altKey && event.key === 'ArrowLeft') {
+    } else if (isExplorerLike && event.altKey && event.key === 'ArrowLeft') {
       handled = controller.navigateBack();
     } else {
-      // Explorer mode swaps expansion keys for navigation: Enter/ArrowRight
-      // descends into the focused directory (Enter also opens files),
-      // ArrowLeft/Backspace goes up one level.
+      // Explorer-like modes swap expansion keys for navigation:
+      // Enter/ArrowRight descends into the focused directory (Enter also
+      // opens files), ArrowLeft/Backspace goes up one level.
       switch (event.key) {
         case 'ArrowDown':
           controller.focusNextItem();
@@ -2445,7 +2685,7 @@ export function FileTreeView({
           controller.focusPreviousItem();
           break;
         case 'ArrowRight':
-          if (isExplorerMode) {
+          if (isExplorerLike) {
             handled =
               focusedDirectoryItem != null && controller.openFocusedItem();
           } else if (
@@ -2458,7 +2698,7 @@ export function FileTreeView({
           }
           break;
         case 'ArrowLeft':
-          if (isExplorerMode) {
+          if (isExplorerLike) {
             handled = controller.navigateUp();
           } else if (
             focusedDirectoryItem != null &&
@@ -2470,10 +2710,10 @@ export function FileTreeView({
           }
           break;
         case 'Backspace':
-          handled = isExplorerMode && controller.navigateUp();
+          handled = isExplorerLike && controller.navigateUp();
           break;
         case 'Enter':
-          handled = isExplorerMode && controller.openFocusedItem();
+          handled = isExplorerLike && controller.openFocusedItem();
           break;
         case 'Home':
           controller.focusFirstItem();
@@ -3705,6 +3945,37 @@ export function FileTreeView({
     ]
   );
 
+  const handleColumnRowClick = useCallback(
+    (event: MouseEvent, row: FileTreeVisibleRow): void => {
+      // Double click enters a directory / opens a file, exactly like the
+      // active pane. A single click reveals the row instead: its parent
+      // directory becomes the active pane and the row becomes the focused,
+      // selected item there (which also refreshes the preview pane).
+      if ((event.detail ?? 1) >= 2) {
+        controller.openMountedPathFromInput(row.path);
+        return;
+      }
+
+      controller.selectOnlyMountedPathFromInput(row.path);
+      domFocusOwnerRef.current = true;
+      controller.focusPath(row.path);
+    },
+    [controller]
+  );
+
+  // Keep the newest (rightmost) pane in view as the columns chain deepens or
+  // the preview pane appears; between navigations the user can scroll back to
+  // earlier panes freely.
+  const explorerColumnCount = explorerColumns?.length ?? 0;
+  useLayoutEffect(() => {
+    const wrapElement = columnsWrapRef.current;
+    if (!isColumnsMode || wrapElement == null) {
+      return;
+    }
+
+    wrapElement.scrollLeft = wrapElement.scrollWidth;
+  }, [explorerColumnCount, explorerDirectoryPath, isColumnsMode]);
+
   const openMenuFromTrigger = (): void => {
     if (isScrollingRef.current) {
       return;
@@ -3742,8 +4013,9 @@ export function FileTreeView({
   // for where each ref is registered, which is the invariant sticky reuse
   // depends on.
   const flowRowFrame: FileTreeRenderRowFrame = {
-    columns,
+    columns: metadataColumns,
     contextHoverPath: visualContextHoverPath,
+    showDescendAffordance: descendAffordanceEnabled,
     contextMenuButtonTriggerEnabled,
     contextMenuButtonVisibility,
     contextMenuEnabled,
@@ -3800,7 +4072,9 @@ export function FileTreeView({
       }
       data-file-tree-has-git-lane={gitLaneActive ? 'true' : undefined}
       data-file-tree-has-metadata-lane={
-        columns != null && columns.length > 0 ? 'true' : undefined
+        metadataColumns != null && metadataColumns.length > 0
+          ? 'true'
+          : undefined
       }
       data-file-tree-view-mode={viewMode}
       data-file-tree-virtualized-root="true"
@@ -3810,7 +4084,9 @@ export function FileTreeView({
       onKeyDown={handleTreeKeyDown}
       onPointerLeave={contextMenuEnabled ? handleTreePointerLeave : undefined}
       onPointerOver={contextMenuEnabled ? handleTreePointerOver : undefined}
-      role={isExplorerMode ? 'listbox' : 'tree'}
+      // The columns view renders one listbox per pane, so the root is only a
+      // grouping container there.
+      role={isColumnsMode ? 'group' : isExplorerMode ? 'listbox' : 'tree'}
       tabIndex={-1}
       style={{
         outline: 'none',
@@ -3822,7 +4098,7 @@ export function FileTreeView({
         dangerouslySetInnerHTML={{ __html: guideStyleText }}
       />
       <slot name={HEADER_SLOT_NAME} data-type="header-slot" />
-      {isExplorerMode ? (
+      {isExplorerLike ? (
         <div data-file-tree-explorer-bar="true">
           <button
             type="button"
@@ -3915,100 +4191,142 @@ export function FileTreeView({
           />
         </div>
       ) : null}
-      <div ref={scrollRef} data-file-tree-virtualized-scroll="true">
-        {isExplorerMode && layoutSnapshot.physical.totalRowCount === 0 ? (
-          <div data-file-tree-explorer-empty="true">
-            {isSearchOpen && searchValue.length > 0
-              ? 'No matches'
-              : 'Empty directory'}
-          </div>
-        ) : null}
-        {stickyFolders && hasStickyUiMount && stickyRows.length > 0 ? (
-          <div aria-hidden="true" data-file-tree-sticky-overlay="true">
+      <div
+        ref={columnsWrapRef}
+        data-file-tree-columns-wrap={isColumnsMode ? 'active' : 'inactive'}
+      >
+        {explorerColumns
+          ?.filter((column) => column.kind === 'ancestor')
+          .map((column) => (
+            <FileTreeSideColumn
+              key={`ancestor:${column.directoryPath}`}
+              column={column}
+              controller={controller}
+              initialViewportHeight={initialViewportHeight}
+              itemHeight={itemHeight}
+              onRowClick={handleColumnRowClick}
+              overscan={overscan}
+              resolveIcon={resolveIcon}
+              showDescendAffordance={descendAffordanceEnabled}
+            />
+          ))}
+        <div
+          ref={scrollRef}
+          aria-label={
+            isColumnsMode
+              ? (explorerBreadcrumbs?.at(-1)?.name ?? '/')
+              : undefined
+          }
+          data-file-tree-virtualized-scroll="true"
+          role={isColumnsMode ? 'listbox' : undefined}
+        >
+          {isExplorerLike && layoutSnapshot.physical.totalRowCount === 0 ? (
+            <div data-file-tree-explorer-empty="true">
+              {isSearchOpen && searchValue.length > 0
+                ? 'No matches'
+                : 'Empty directory'}
+            </div>
+          ) : null}
+          {stickyFolders && hasStickyUiMount && stickyRows.length > 0 ? (
+            <div aria-hidden="true" data-file-tree-sticky-overlay="true">
+              <div
+                data-file-tree-sticky-overlay-content="true"
+                style={{ height: `${overlayRowsHeight}px` }}
+              >
+                {stickyRows.map((entry, index) =>
+                  renderStyledRow(
+                    stickyRowFrame,
+                    entry.row,
+                    `sticky:${getFileTreeRowPath(entry.row)}`,
+                    {
+                      mode: 'sticky',
+                      style: {
+                        left: '0',
+                        position: 'absolute',
+                        right: '0',
+                        top: `${entry.top}px`,
+                        zIndex: `${stickyRows.length - index}`,
+                      },
+                    }
+                  )
+                )}
+              </div>
+            </div>
+          ) : null}
+          <div
+            ref={listRef}
+            data-file-tree-virtualized-list="true"
+            style={{ height: `${totalScrollableHeight}px` }}
+          >
             <div
-              data-file-tree-sticky-overlay-content="true"
-              style={{ height: `${overlayRowsHeight}px` }}
+              data-file-tree-virtualized-sticky-offset="true"
+              aria-hidden="true"
+              style={{ height: `${windowOffsetTop}px` }}
+            />
+            <div
+              data-file-tree-virtualized-sticky="true"
+              style={{
+                height: `${windowHeight}px`,
+                top: `${windowStickyTopInset}px`,
+                bottom: `${windowStickyBottomInset}px`,
+              }}
             >
-              {stickyRows.map((entry, index) =>
-                renderStyledRow(
-                  stickyRowFrame,
-                  entry.row,
-                  `sticky:${getFileTreeRowPath(entry.row)}`,
-                  {
-                    mode: 'sticky',
-                    style: {
-                      left: '0',
-                      position: 'absolute',
-                      right: '0',
-                      top: `${entry.top}px`,
-                      zIndex: `${stickyRows.length - index}`,
-                    },
-                  }
-                )
-              )}
+              {renderRangeChildren(flowRowFrame, range, stickyRowPathSet)}
+              {parkedFocusedRow != null && parkedFocusedRowOffset != null
+                ? renderStyledRow(
+                    flowRowFrame,
+                    parkedFocusedRow,
+                    `parked:${parkedFocusedRow.path}`,
+                    {
+                      isParked: true,
+                      style: {
+                        left: '0',
+                        opacity: '0',
+                        pointerEvents:
+                          draggedPrimaryPath === parkedFocusedRow.path
+                            ? 'none'
+                            : undefined,
+                        position: 'absolute',
+                        right: '0',
+                        top: `${parkedFocusedRowOffset}px`,
+                      },
+                    }
+                  )
+                : null}
+              {parkedDraggedRow != null && parkedDraggedRowOffset != null
+                ? renderStyledRow(
+                    flowRowFrame,
+                    parkedDraggedRow,
+                    `parked-drag:${parkedDraggedRow.path}`,
+                    {
+                      isParked: true,
+                      style: {
+                        left: '0',
+                        opacity: '0',
+                        pointerEvents: 'none',
+                        position: 'absolute',
+                        right: '0',
+                        top: `${parkedDraggedRowOffset}px`,
+                      },
+                    }
+                  )
+                : null}
             </div>
           </div>
-        ) : null}
-        <div
-          ref={listRef}
-          data-file-tree-virtualized-list="true"
-          style={{ height: `${totalScrollableHeight}px` }}
-        >
-          <div
-            data-file-tree-virtualized-sticky-offset="true"
-            aria-hidden="true"
-            style={{ height: `${windowOffsetTop}px` }}
-          />
-          <div
-            data-file-tree-virtualized-sticky="true"
-            style={{
-              height: `${windowHeight}px`,
-              top: `${windowStickyTopInset}px`,
-              bottom: `${windowStickyBottomInset}px`,
-            }}
-          >
-            {renderRangeChildren(flowRowFrame, range, stickyRowPathSet)}
-            {parkedFocusedRow != null && parkedFocusedRowOffset != null
-              ? renderStyledRow(
-                  flowRowFrame,
-                  parkedFocusedRow,
-                  `parked:${parkedFocusedRow.path}`,
-                  {
-                    isParked: true,
-                    style: {
-                      left: '0',
-                      opacity: '0',
-                      pointerEvents:
-                        draggedPrimaryPath === parkedFocusedRow.path
-                          ? 'none'
-                          : undefined,
-                      position: 'absolute',
-                      right: '0',
-                      top: `${parkedFocusedRowOffset}px`,
-                    },
-                  }
-                )
-              : null}
-            {parkedDraggedRow != null && parkedDraggedRowOffset != null
-              ? renderStyledRow(
-                  flowRowFrame,
-                  parkedDraggedRow,
-                  `parked-drag:${parkedDraggedRow.path}`,
-                  {
-                    isParked: true,
-                    style: {
-                      left: '0',
-                      opacity: '0',
-                      pointerEvents: 'none',
-                      position: 'absolute',
-                      right: '0',
-                      top: `${parkedDraggedRowOffset}px`,
-                    },
-                  }
-                )
-              : null}
-          </div>
         </div>
+        {explorerPreviewColumn != null ? (
+          <FileTreeSideColumn
+            key={`preview:${explorerPreviewColumn.directoryPath}`}
+            column={explorerPreviewColumn}
+            controller={controller}
+            initialViewportHeight={initialViewportHeight}
+            itemHeight={itemHeight}
+            onRowClick={handleColumnRowClick}
+            overscan={overscan}
+            resolveIcon={resolveIcon}
+            showDescendAffordance={descendAffordanceEnabled}
+          />
+        ) : null}
       </div>
       {contextMenuEnabled ? (
         <div

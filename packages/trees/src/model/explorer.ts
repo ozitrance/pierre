@@ -219,3 +219,16 @@ export function getExplorerRowName(
 ): string {
   return getExplorerChildName(path, directoryPath.length);
 }
+
+/** Basename of a canonical directory path ('' or 'a/b/'); '' for the root. */
+export function getExplorerDirectoryName(directoryPath: string): string {
+  if (directoryPath.length === 0) {
+    return '';
+  }
+
+  const withoutSlash = directoryPath.slice(0, -1);
+  const separatorIndex = withoutSlash.lastIndexOf('/');
+  return separatorIndex === -1
+    ? withoutSlash
+    : withoutSlash.slice(separatorIndex + 1);
+}

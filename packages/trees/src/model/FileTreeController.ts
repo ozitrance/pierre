@@ -21,6 +21,7 @@ import {
 import {
   collectExplorerChildren,
   getExplorerBreadcrumbs,
+  getExplorerDirectoryName,
   getExplorerRowName,
   sortExplorerChildren,
 } from './explorer';
@@ -50,6 +51,7 @@ import type {
   FileTreeDirectoryHandle,
   FileTreeDragAndDropConfig,
   FileTreeDropTarget,
+  FileTreeExplorerColumn,
   FileTreeExplorerConfig,
   FileTreeFileHandle,
   FileTreeItemHandle,
@@ -134,6 +136,14 @@ interface FileTreeExplorerHistoryEntry {
 interface FileTreeExplorerListingState {
   hasChildrenByIndex: Uint8Array;
   paths: readonly string[];
+}
+
+// A cached side-pane listing for the columns view. `indexByPath` is built
+// lazily on the first chain-highlight lookup so panes that never need it
+// (preview panes) skip the map entirely.
+interface FileTreeExplorerColumnCacheEntry {
+  indexByPath: Map<string, number> | null;
+  listing: FileTreeExplorerListingState;
 }
 
 function normalizeScrollOffset(
@@ -263,9 +273,13 @@ export class FileTreeController
   #ancestorIndicesByIndex = new Map<number, readonly number[]>();
   #ancestorPathsByIndex = new Map<number, readonly string[]>();
   #explorerConfig: FileTreeExplorerConfig | null = null;
-  // Canonical current directory ('' means the root). Only meaningful while
-  // #viewMode is 'explorer', but preserved across mode switches so returning
-  // to explorer mode lands where the user left off.
+  // Cached side-pane listings for the columns view, keyed by canonical
+  // directory path. Navigation only picks different keys; entries drop when
+  // the canonical path set changes or the tree leaves the explorer-like modes.
+  #explorerColumnListings = new Map<string, FileTreeExplorerColumnCacheEntry>();
+  // Canonical current directory ('' means the root). Only meaningful in the
+  // explorer-like modes ('explorer' and 'columns', which share it), but
+  // preserved across mode switches so returning lands where the user left off.
   #explorerDirectoryPath = '';
   #explorerHistory: FileTreeExplorerHistoryEntry[] = [];
   // Unfiltered sorted listing of the current directory. Null when it needs a
@@ -355,8 +369,8 @@ export class FileTreeController
       resolvedInput.preparedInput
     );
     this.#explorerConfig = explorer ?? null;
-    if (viewMode === 'explorer') {
-      this.#viewMode = 'explorer';
+    if (viewMode === 'explorer' || viewMode === 'columns') {
+      this.#viewMode = viewMode;
       this.#explorerDirectoryPath =
         this.#resolveExplorerDirectoryPath(explorer?.initialDirectory ?? '') ??
         '';
@@ -409,8 +423,9 @@ export class FileTreeController
   }
 
   public focusParentItem(): void {
-    // Explorer listings are flat; the parent directory has no row to focus.
-    if (this.#focusedPath == null || this.#viewMode === 'explorer') {
+    // Explorer-like listings are flat; the parent directory has no row to
+    // focus.
+    if (this.#focusedPath == null || this.#isExplorerLike) {
       return;
     }
 
@@ -431,7 +446,7 @@ export class FileTreeController
       return;
     }
 
-    if (this.#viewMode === 'explorer') {
+    if (this.#isExplorerLike) {
       this.#revealExplorerPath(resolvedPath);
     } else {
       this.#ensureFullProjection();
@@ -454,7 +469,7 @@ export class FileTreeController
       return;
     }
 
-    if (this.#viewMode === 'explorer') {
+    if (this.#isExplorerLike) {
       this.#revealExplorerPath(resolvedPath);
     } else {
       this.#ensureFullProjection();
@@ -587,7 +602,7 @@ export class FileTreeController
       return [];
     }
 
-    if (this.#viewMode === 'explorer') {
+    if (this.#isExplorerLike) {
       return this.#getExplorerVisibleRows(boundedStart, boundedEnd);
     }
 
@@ -700,8 +715,9 @@ export class FileTreeController
     scrollTop: number,
     itemHeight: number
   ): readonly FileTreeStickyRowCandidate[] | null {
-    // Explorer listings are flat, so there is never a sticky ancestor chain.
-    if (this.#viewMode === 'explorer') {
+    // Explorer-like listings are flat, so there is never a sticky ancestor
+    // chain.
+    if (this.#isExplorerLike) {
       return [];
     }
 
@@ -965,8 +981,8 @@ export class FileTreeController
 
   public startDrag(path: string): boolean {
     // Drag targets rely on tree topology (ancestor drops, hover-to-expand),
-    // none of which exists in the flat explorer listing.
-    if (this.#dragAndDropConfig == null || this.#viewMode === 'explorer') {
+    // none of which exists in the flat explorer-like listings.
+    if (this.#dragAndDropConfig == null || this.#isExplorerLike) {
       return false;
     }
 
@@ -1188,11 +1204,20 @@ export class FileTreeController
     return this.#viewMode;
   }
 
+  // 'explorer' and 'columns' share the flat per-directory projection and all
+  // navigation state; 'tree' is the only mode backed by the store's
+  // hierarchical projection.
+  get #isExplorerLike(): boolean {
+    return this.#viewMode !== 'tree';
+  }
+
   /**
-   * Switches between the expandable tree and the flat explorer listing. Any
-   * open search session closes first because each mode owns its own filtering
-   * semantics. Entering explorer mode lands in the focused item's directory;
-   * returning to tree mode expands ancestors so that item stays visible.
+   * Switches between the expandable tree and the flat explorer-like listings.
+   * Any open search session closes first because each mode owns its own
+   * filtering semantics. Entering an explorer-like mode lands in the focused
+   * item's directory; returning to tree mode expands ancestors so that item
+   * stays visible. 'explorer' and 'columns' share their navigation state, so
+   * switching between them keeps the current directory, focus, and history.
    */
   public setViewMode(mode: FileTreeViewMode): void {
     if (mode === this.#viewMode) {
@@ -1203,16 +1228,23 @@ export class FileTreeController
       this.#setSearchState(null, true);
     }
 
+    if (this.#isExplorerLike && mode !== 'tree') {
+      this.#viewMode = mode;
+      this.#emit();
+      return;
+    }
+
     const focusedPath = this.#focusedPath;
     this.#explorerHistory.length = 0;
-    if (mode === 'explorer') {
-      this.#viewMode = 'explorer';
+    if (mode !== 'tree') {
+      this.#viewMode = mode;
       this.#explorerListing = null;
       this.#explorerDirectoryPath =
         this.#resolveExplorerEntryDirectory(focusedPath);
       this.#rebuildVisibleProjection(focusedPath, false);
     } else {
       this.#viewMode = 'tree';
+      this.#explorerColumnListings.clear();
       this.#explorerVisibleHasChildren = null;
       this.#explorerVisibleIndexByPath = null;
       this.#explorerVisiblePaths = null;
@@ -1233,23 +1265,171 @@ export class FileTreeController
     return getExplorerBreadcrumbs(this.#explorerDirectoryPath);
   }
 
+  /**
+   * Columns-view panes, left to right: one 'ancestor' pane per directory on
+   * the current chain (starting at the root), the 'active' pane (the explorer
+   * listing itself, whose rows come from getVisibleRows), and — when the
+   * focused row is a directory — a 'preview' pane listing its children.
+   * Empty outside 'columns' mode.
+   */
+  public getExplorerColumns(): readonly FileTreeExplorerColumn[] {
+    if (this.#viewMode !== 'columns') {
+      return [];
+    }
+
+    // The chain is the root plus every breadcrumb; its last entry is the
+    // active directory and everything before it renders as an ancestor pane.
+    const breadcrumbs = getExplorerBreadcrumbs(this.#explorerDirectoryPath);
+    const chainPaths = [
+      '',
+      ...breadcrumbs.map((breadcrumb) => breadcrumb.path),
+    ];
+    const columns: FileTreeExplorerColumn[] = [];
+    for (let index = 0; index < chainPaths.length - 1; index += 1) {
+      const directoryPath = chainPaths[index];
+      const selectedPath = chainPaths[index + 1];
+      const entry = this.#getExplorerColumnEntry(directoryPath);
+      columns.push({
+        directoryPath,
+        kind: 'ancestor',
+        name: getExplorerDirectoryName(directoryPath),
+        rowCount: entry.listing.paths.length,
+        selectedIndex: this.#getExplorerColumnSelectedIndex(
+          entry,
+          selectedPath
+        ),
+        selectedPath,
+      });
+    }
+
+    columns.push({
+      directoryPath: this.#explorerDirectoryPath,
+      kind: 'active',
+      name: getExplorerDirectoryName(this.#explorerDirectoryPath),
+      rowCount: this.#visibleCount,
+      selectedIndex: -1,
+      selectedPath: null,
+    });
+
+    const focusedPath = this.#focusedPath;
+    if (focusedPath != null && isCanonicalDirectoryPath(focusedPath)) {
+      const entry = this.#getExplorerColumnEntry(focusedPath);
+      columns.push({
+        directoryPath: focusedPath,
+        kind: 'preview',
+        name: getExplorerDirectoryName(focusedPath),
+        rowCount: entry.listing.paths.length,
+        selectedIndex: -1,
+        selectedPath: null,
+      });
+    }
+
+    return columns;
+  }
+
+  /**
+   * Windowed rows for one columns-view side pane, addressed by its canonical
+   * directory path. The active pane keeps reading getVisibleRows() (which
+   * carries focus, selection, and the search filter); this accessor serves
+   * the unfiltered ancestor and preview panes.
+   */
+  public getExplorerColumnRows(
+    directoryPath: string,
+    start: number,
+    end: number
+  ): readonly FileTreeVisibleRow[] {
+    if (this.#viewMode !== 'columns' || end < start) {
+      return [];
+    }
+
+    const resolvedPath = this.#resolveExplorerDirectoryPath(directoryPath);
+    if (resolvedPath == null) {
+      return [];
+    }
+
+    const { listing } = this.#getExplorerColumnEntry(resolvedPath);
+    const boundedStart = Math.max(0, start);
+    const boundedEnd = Math.min(listing.paths.length - 1, end);
+    const rows: FileTreeVisibleRow[] = [];
+    for (let index = boundedStart; index <= boundedEnd; index += 1) {
+      const path = listing.paths[index];
+      if (path == null) {
+        break;
+      }
+
+      const isDirectory = isCanonicalDirectoryPath(path);
+      rows.push({
+        ancestorPaths: EMPTY_ANCESTOR_PATHS,
+        depth: 0,
+        hasChildren: isDirectory && listing.hasChildrenByIndex[index] === 1,
+        index,
+        isExpanded: false,
+        isFlattened: false,
+        // Side panes never carry keyboard focus; the active pane owns it.
+        isFocused: false,
+        isSelected: this.#selectedPaths.has(path),
+        kind: isDirectory ? 'directory' : 'file',
+        level: 0,
+        name: getExplorerRowName(path, resolvedPath),
+        path,
+        posInSet: index,
+        setSize: listing.paths.length,
+      });
+    }
+
+    return rows;
+  }
+
+  #getExplorerColumnEntry(
+    directoryPath: string
+  ): FileTreeExplorerColumnCacheEntry {
+    const cachedEntry = this.#explorerColumnListings.get(directoryPath);
+    if (cachedEntry != null) {
+      return cachedEntry;
+    }
+
+    const entry: FileTreeExplorerColumnCacheEntry = {
+      indexByPath: null,
+      listing: sortExplorerChildren(
+        collectExplorerChildren(this.#getAllKnownPaths(), directoryPath),
+        directoryPath,
+        this.#baseOptions.sort
+      ),
+    };
+    this.#explorerColumnListings.set(directoryPath, entry);
+    return entry;
+  }
+
+  #getExplorerColumnSelectedIndex(
+    entry: FileTreeExplorerColumnCacheEntry,
+    selectedPath: string
+  ): number {
+    if (entry.indexByPath == null) {
+      entry.indexByPath = new Map();
+      for (let index = 0; index < entry.listing.paths.length; index += 1) {
+        entry.indexByPath.set(entry.listing.paths[index], index);
+      }
+    }
+
+    return entry.indexByPath.get(selectedPath) ?? -1;
+  }
+
   public canNavigateUp(): boolean {
-    return (
-      this.#viewMode === 'explorer' && this.#explorerDirectoryPath.length > 0
-    );
+    return this.#isExplorerLike && this.#explorerDirectoryPath.length > 0;
   }
 
   public canNavigateBack(): boolean {
-    return this.#viewMode === 'explorer' && this.#explorerHistory.length > 0;
+    return this.#isExplorerLike && this.#explorerHistory.length > 0;
   }
 
   /**
    * Makes `path` the explorer's current directory. Accepts '' (or '/') for
    * the root and both canonical (`src/`) and bare (`src`) directory paths.
-   * Returns false outside explorer mode or when the path is not a directory.
+   * Returns false outside the explorer-like modes or when the path is not a
+   * directory.
    */
   public navigateToDirectory(path: string): boolean {
-    if (this.#viewMode !== 'explorer') {
+    if (!this.#isExplorerLike) {
       return false;
     }
 
@@ -1265,7 +1445,7 @@ export class FileTreeController
 
   /** Moves the explorer to the parent directory, focusing the exited one. */
   public navigateUp(): boolean {
-    if (this.#viewMode !== 'explorer' || this.#explorerDirectoryPath === '') {
+    if (!this.#isExplorerLike || this.#explorerDirectoryPath === '') {
       return false;
     }
 
@@ -1278,7 +1458,7 @@ export class FileTreeController
 
   /** Returns to the most recent explorer directory that still exists. */
   public navigateBack(): boolean {
-    if (this.#viewMode !== 'explorer') {
+    if (!this.#isExplorerLike) {
       return false;
     }
 
@@ -1303,11 +1483,11 @@ export class FileTreeController
   }
 
   /**
-   * Explorer-mode Enter behavior for the focused row: descend into a focused
+   * Explorer-like Enter behavior for the focused row: descend into a focused
    * directory, or report a focused file through `explorer.onOpenFile`.
    */
   public openFocusedItem(): boolean {
-    if (this.#viewMode !== 'explorer' || this.#focusedPath == null) {
+    if (!this.#isExplorerLike || this.#focusedPath == null) {
       return false;
     }
 
@@ -1317,7 +1497,7 @@ export class FileTreeController
   // Only use this for paths sourced from currently mounted rows (double-click
   // activation). The live-store check revalidates stale DOM events.
   public openMountedPathFromInput(path: string): void {
-    if (this.#viewMode === 'explorer') {
+    if (this.#isExplorerLike) {
       this.#openExplorerPath(path);
     }
   }
@@ -1350,10 +1530,10 @@ export class FileTreeController
     // Expand any collapsed ancestors so the renaming row can actually mount.
     // If the row stays hidden under a collapsed directory, the React
     // rename-handoff effect keeps asking the view to reveal a row that can
-    // never render, spinning the component forever. Explorer mode has no
-    // expansion; there the row only mounts when it belongs to the current
+    // never render, spinning the component forever. Explorer-like modes have
+    // no expansion; there the row only mounts when it belongs to the current
     // directory listing, so reject renames for anything else.
-    if (this.#viewMode === 'explorer') {
+    if (this.#isExplorerLike) {
       const parentPath = getImmediateParentPath(canonicalPath) ?? '';
       if (parentPath !== this.#explorerDirectoryPath) {
         return false;
@@ -1890,6 +2070,7 @@ export class FileTreeController
   }
 
   #invalidateKnownPathCaches(): void {
+    this.#explorerColumnListings.clear();
     this.#explorerListing = null;
     this.#knownDirectoryPaths = null;
     this.#knownDirectoryPathsLowerCase = null;
@@ -2252,9 +2433,9 @@ export class FileTreeController
       return;
     }
 
-    // Explorer search filters the current directory listing by name and never
-    // touches expansion state, so it bypasses the tree search machinery.
-    if (this.#viewMode === 'explorer') {
+    // Explorer-like search filters the current directory listing by name and
+    // never touches expansion state, so it bypasses the tree search machinery.
+    if (this.#isExplorerLike) {
       this.#searchValue = normalizedValue;
       this.#rebuildVisibleProjection(this.#focusedPath, false);
       if (emitChange) {
@@ -2439,7 +2620,7 @@ export class FileTreeController
     this.#projectionPaths = projection.paths;
     this.#projectionPosInSetByIndex = projection.posInSetByIndex;
     this.#projectionSetSizeByIndex = projection.setSizeByIndex;
-    if (this.#viewMode === 'explorer') {
+    if (this.#isExplorerLike) {
       this.#syncExplorerVisibleState();
     } else {
       this.#syncSearchVisibilityState();
@@ -2508,9 +2689,10 @@ export class FileTreeController
   }
 
   #ensureFullProjection(): void {
-    // Explorer rows never read the store projection, so skip the full-tree
-    // walk while the mode is active; switching back to tree mode rebuilds.
-    if (this.#hasFullProjection || this.#viewMode === 'explorer') {
+    // Explorer-like rows never read the store projection, so skip the
+    // full-tree walk while those modes are active; switching back to tree
+    // mode rebuilds.
+    if (this.#hasFullProjection || this.#isExplorerLike) {
       return;
     }
 
@@ -2587,10 +2769,10 @@ export class FileTreeController
       const focusPathCandidate = isPathMutationEvent(event)
         ? this.#applyMutationState(event)
         : this.#focusedPath;
-      // Explorer search state lives inside the explorer projection sync, so
-      // the tree-mode expansion-driven refresh must not run there.
+      // Explorer-like search state lives inside the explorer projection sync,
+      // so the tree-mode expansion-driven refresh must not run there.
       const searchFocusCandidate =
-        this.#viewMode !== 'explorer' &&
+        !this.#isExplorerLike &&
         this.#searchValue != null &&
         this.#searchValue.length > 0
           ? this.#refreshActiveSearchState()
@@ -2598,7 +2780,7 @@ export class FileTreeController
             ? this.#focusedPath
             : focusPathCandidate;
       const shouldBuildFullProjection =
-        this.#viewMode !== 'explorer' &&
+        !this.#isExplorerLike &&
         (this.#searchValue != null ||
           (event.operation !== 'expand' && event.operation !== 'collapse'));
       this.#rebuildVisibleProjection(

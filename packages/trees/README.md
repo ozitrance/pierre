@@ -82,6 +82,32 @@ const explorer = useFileTreeExplorer(model);
 // explorer.navigateTo(path), explorer.navigateUp(), explorer.setViewMode(mode)
 ```
 
+## Columns view
+
+`viewMode: 'columns'` presents the same navigation state as explorer mode in a
+Miller-column layout, like the macOS Finder columns view: one pane per directory
+on the current chain, the active listing, and a preview pane for the focused
+directory. ArrowRight/Enter descends, ArrowLeft steps back to the parent pane,
+and a single click in any side pane reveals that item (its parent directory
+becomes the active pane). Double click enters directories and opens files
+through the same `explorer` callbacks.
+
+```ts
+const tree = new FileTree({ explorer, paths, viewMode: 'columns' });
+
+tree.setViewMode('explorer'); // explorer <-> columns keeps directory & history
+tree.getExplorerColumns(); // [{ directoryPath, kind, rowCount, ... }, …]
+```
+
+Because explorer and columns share their state, everything above — the
+navigation methods, breadcrumbs, `explorer.initialDirectory`, and
+`useFileTreeExplorer` — works unchanged in columns mode. Every pane is the same
+fixed width, set by `--trees-columns-pane-width`; leftover space stays empty so
+pane widths never shift as the preview pane comes and goes. Metadata columns are
+not rendered in the columns view; its panes are name-focused like Finder's.
+Directory rows show a descend chevron right after the name in every pane; pass
+`columnsDescendAffordance: false` to drop it.
+
 ## Metadata columns
 
 Rows can render right-aligned detail columns — file size, modified time, and a

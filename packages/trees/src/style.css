@@ -603,6 +603,7 @@
   }
 
   [data-file-tree-virtualized-scroll='true'],
+  [data-file-tree-column],
   [data-file-tree-scrollbar-measure='true'] {
     --trees-scrollbar-thumb-current: transparent;
     overflow-y: auto;
@@ -649,13 +650,15 @@
 
   @supports (-moz-appearance: none) {
     [data-file-tree-virtualized-scroll='true'],
+    [data-file-tree-column],
     [data-file-tree-scrollbar-measure='true'] {
       scrollbar-width: thin;
       scrollbar-color: var(--trees-scrollbar-thumb-current) transparent;
     }
   }
 
-  [data-file-tree-virtualized-scroll='true'] {
+  [data-file-tree-virtualized-scroll='true'],
+  [data-file-tree-column] {
     position: relative;
     overflow-y: auto;
     flex: 1 1 0;
@@ -683,7 +686,8 @@
   }
 
   @supports (-moz-appearance: none) {
-    [data-file-tree-virtualized-scroll='true'] {
+    [data-file-tree-virtualized-scroll='true'],
+    [data-file-tree-column] {
       padding-inline: max(
           calc(var(--trees-padding-inline) - var(--trees-item-margin-x)),
           0px
@@ -918,9 +922,95 @@
     user-select: none;
   }
 
-  /* The wrapper for the tree items (listbox is the explorer-mode role) */
-  [role='tree'],
-  [role='listbox'] {
+  /* COLUMNS MODE (Miller columns) */
+  /* Outside columns mode the wrapper contributes no box, so the scroll
+   * container keeps its usual flex slot in the root column layout. */
+  [data-file-tree-columns-wrap='inactive'] {
+    display: contents;
+  }
+
+  [data-file-tree-columns-wrap='active'] {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
+    overflow-x: auto;
+    overflow-y: hidden;
+
+    /* Every pane, including the active listing, is the same fixed width —
+     * leftover space stays empty (like Finder) so pane widths never jump as
+     * the preview pane appears or a pane changes role during navigation. */
+    > [data-file-tree-column],
+    > [data-file-tree-virtualized-scroll='true'] {
+      flex: 0 0 var(--trees-columns-pane-width, 14em);
+      width: var(--trees-columns-pane-width, 14em);
+      min-width: 0;
+      border-inline-end: 1px solid var(--trees-border-color);
+    }
+  }
+
+  /* Scroll/padding metrics come from the shared scroll-container rules (the
+   * pane selector is part of those groups) so a listing keeps identical
+   * horizontal geometry whether it renders as a side pane or as the active
+   * pane. */
+  [data-file-tree-column] {
+    overflow-x: hidden;
+  }
+
+  /* A flex column (like the main virtualized window) so row buttons stretch
+   * to the pane width instead of shrink-wrapping their content. */
+  [data-file-tree-column-list] {
+    position: relative;
+    overflow-anchor: none;
+    display: flex;
+    flex-direction: column;
+  }
+
+  [data-file-tree-column-offset] {
+    flex: 0 0 auto;
+  }
+
+  /* Ancestor-chain rows mirror selection with a muted wash so the path from
+   * the root pane to the active pane reads at a glance. */
+  button[data-type='item'][data-item-chain-selected='true'] {
+    background-color: color-mix(
+      in lab,
+      var(--trees-selected-bg) 45%,
+      var(--trees-bg)
+    );
+    --truncate-marker-background-overlay-color: color-mix(
+      in lab,
+      var(--trees-selected-bg) 45%,
+      var(--trees-bg)
+    );
+  }
+
+  /* Sits directly after the (possibly truncated) name — the row's own `gap`
+   * provides the spacing — leaving the rest of the row free for future
+   * right-aligned content. */
+  [data-item-column-descend] {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    color: var(--trees-fg-muted);
+  }
+
+  /* Chevron pointing right: side-pane directories descend into the next
+   * pane. Nested to outweigh the base chevron alignment rules, which also
+   * set `transform`. */
+  [data-item-column-descend] [data-icon-name='file-tree-icon-chevron'] {
+    &[data-align-capitals='false'],
+    &[data-align-capitals='true'] {
+      transform: rotate(-90deg);
+    }
+  }
+
+  /* The wrapper for the tree items. Scoped to the root element (which
+   * carries the tree / listbox / group role depending on the view mode)
+   * because the columns view puts listbox roles on its scrollable panes,
+   * where a flex layout would break their scroll geometry. */
+  [data-file-tree-virtualized-root='true'] {
     position: relative;
     display: flex;
     flex-direction: column;

@@ -66,7 +66,8 @@ export function computeFileTreeRowElementAttributes(
     extraStyle,
   } = input;
   const isSticky = mode === 'sticky';
-  const isExplorer = viewMode === 'explorer';
+  // Columns-view rows are flat listbox options too, one listbox per pane.
+  const isExplorer = viewMode === 'explorer' || viewMode === 'columns';
   const parentPath = row.ancestorPaths.at(-1) ?? '';
 
   const stateAttributes: Record<string, unknown> = {};

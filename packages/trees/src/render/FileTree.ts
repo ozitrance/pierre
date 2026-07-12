@@ -37,6 +37,7 @@ import type {
   FileTreeBreadcrumb,
   FileTreeColumn,
   FileTreeCompositionOptions,
+  FileTreeExplorerColumn,
   FileTreeGitStatusPatch,
   FileTreeHydrationProps,
   FileTreeItemHandle,
@@ -200,7 +201,11 @@ export class FileTree
   readonly #density: FileTreeDensityPreset;
   readonly #viewOptions: Pick<
     FileTreeOptions,
-    'initialVisibleRowCount' | 'itemHeight' | 'overscan' | 'stickyFolders'
+    | 'columnsDescendAffordance'
+    | 'initialVisibleRowCount'
+    | 'itemHeight'
+    | 'overscan'
+    | 'stickyFolders'
   >;
   #fileTreeContainer: HTMLElement | undefined;
   #gitStatusState: FileTreeGitStatusState | null;
@@ -222,6 +227,7 @@ export class FileTree
   public constructor(options: FileTreeOptions) {
     const {
       columns,
+      columnsDescendAffordance,
       composition,
       density,
       fileTreeSearchMode,
@@ -259,6 +265,7 @@ export class FileTree
     this.#searchFakeFocus = searchFakeFocus === true;
     this.#density = resolveFileTreeDensity(density, itemHeight);
     this.#viewOptions = {
+      columnsDescendAffordance,
       itemHeight: this.#density.itemHeight,
       overscan,
       stickyFolders,
@@ -463,6 +470,10 @@ export class FileTree
     return this.#controller.getExplorerBreadcrumbs();
   }
 
+  public getExplorerColumns(): readonly FileTreeExplorerColumn[] {
+    return this.#controller.getExplorerColumns();
+  }
+
   public canNavigateUp(): boolean {
     return this.#controller.canNavigateUp();
   }
@@ -637,12 +648,14 @@ export class FileTree
   }
 
   #getInitialViewOptions(): {
+    columnsDescendAffordance?: boolean;
     initialViewportHeight: number;
     itemHeight?: number;
     overscan?: number;
     stickyFolders?: boolean;
   } {
     return {
+      columnsDescendAffordance: this.#viewOptions.columnsDescendAffordance,
       initialViewportHeight: resolveInitialViewportHeight({
         initialVisibleRowCount: this.#viewOptions.initialVisibleRowCount,
         itemHeight: this.#viewOptions.itemHeight,
@@ -953,6 +966,7 @@ export class FileTree
 export function preloadFileTree(options: FileTreeOptions): FileTreeSsrPayload {
   const {
     columns,
+    columnsDescendAffordance,
     composition,
     density,
     fileTreeSearchMode,
@@ -1007,6 +1021,7 @@ export function preloadFileTree(options: FileTreeOptions): FileTreeSsrPayload {
   const bodyHtml = renderToString(
     h(FileTreeView, {
       columns,
+      columnsDescendAffordance,
       composition,
       controller,
       gitStatusByPath: gitStatusState?.statusByPath,
