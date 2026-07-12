@@ -987,8 +987,8 @@
   }
 
   /* Sits directly after the (possibly truncated) name — the row's own `gap`
-   * provides the spacing — leaving the rest of the row free for future
-   * right-aligned content. */
+   * provides the spacing — leaving the rest of the row to the right-aligned
+   * attribute lanes (decorations, git status). */
   [data-item-column-descend] {
     flex: 0 0 auto;
     display: inline-flex;
@@ -1377,6 +1377,13 @@
     text-align: end;
     overflow: hidden;
     color: var(--trees-fg-muted);
+  }
+
+  /* When a row carries metadata cells, the metadata lane is the one that
+   * absorbs the free row width. The decoration lane must not split it with
+   * its own flex-grow, or the cells drift out of column alignment. */
+  [data-item-section='metadata'] ~ [data-item-section='decoration'] {
+    flex: 0 1 auto;
   }
 
   [data-item-section='decoration'] > span {

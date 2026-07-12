@@ -104,9 +104,10 @@ navigation methods, breadcrumbs, `explorer.initialDirectory`, and
 `useFileTreeExplorer` — works unchanged in columns mode. Every pane is the same
 fixed width, set by `--trees-columns-pane-width`; leftover space stays empty so
 pane widths never shift as the preview pane comes and goes. Metadata columns are
-not rendered in the columns view; its panes are name-focused like Finder's.
-Directory rows show a descend chevron right after the name in every pane; pass
-`columnsDescendAffordance: false` to drop it.
+not rendered in the columns view; its panes are name-focused like Finder's. Row
+attributes — git status and custom row decorations — render right-aligned in
+every pane, active or not. Directory rows show a descend chevron right after the
+name in every pane; pass `columnsDescendAffordance: false` to drop it.
 
 ## Metadata columns
 

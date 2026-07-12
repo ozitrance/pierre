@@ -501,6 +501,45 @@ describe('file-tree SSR and hydration', () => {
     );
   });
 
+  test('columns mode side panes carry the git attribute lanes', async () => {
+    const preloadFileTree = await loadPreloadFileTree();
+
+    const payload = preloadFileTree({
+      explorer: { initialDirectory: 'src' },
+      gitStatus: [{ path: 'src/lib/utils.ts', status: 'modified' }],
+      initialExpansion: 'open',
+      paths: ['README.md', 'src/index.ts', 'src/lib/utils.ts'],
+      initialVisibleRowCount: 8,
+      viewMode: 'columns',
+    });
+
+    // The first 'src/' row is in the root ancestor pane (side panes render
+    // before the active pane). It contains the change, so it shows the same
+    // folder dot it would show as the active listing.
+    const [ancestorRow] =
+      payload.shadowHtml.match(
+        /<button[^>]*data-item-path="src\/"[\s\S]*?<\/button>/
+      ) ?? [];
+    expect(ancestorRow).toBeDefined();
+    expect(ancestorRow).toContain('data-item-contains-git-change="true"');
+    expect(ancestorRow).toContain('data-item-section="git"');
+    // The descend chevron sits next to the name, before the right-aligned
+    // attribute lanes.
+    const descendIndex = ancestorRow!.indexOf('data-item-column-descend');
+    expect(descendIndex).toBeGreaterThan(-1);
+    expect(descendIndex).toBeLessThan(
+      ancestorRow!.indexOf('data-item-section="git"')
+    );
+
+    // Preview pane (children of the focused 'lib' directory): the modified
+    // file carries its status letter there too.
+    const previewPane = payload.shadowHtml.slice(
+      payload.shadowHtml.indexOf('data-file-tree-column="preview"')
+    );
+    expect(previewPane).toContain('data-item-git-status="modified"');
+    expect(previewPane).toContain('data-item-section="git"');
+  });
+
   test('hydrating a columns payload with matching options keeps columns markup', async () => {
     const { cleanup, dom } = installDom();
     try {

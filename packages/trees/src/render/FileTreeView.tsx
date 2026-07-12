@@ -898,8 +898,9 @@ function renderFileTreeRowContent(
     metadata = null,
     renameInput = null,
     showDecorativeActionAffordance = false,
-    // Columns-view directories carry a trailing chevron pointing at the next
-    // pane. Every pane renders it (active included) so row layout stays
+    // Columns-view directories carry a chevron pointing at the next pane. It
+    // sits directly after the name, before the right-aligned attribute lanes,
+    // and every pane renders it (active included) so row layout stays
     // identical as panes change roles during navigation.
     showDescendAffordance = false,
   }: {
@@ -952,6 +953,11 @@ function renderFileTreeRowContent(
               </MiddleTruncate>
             ))}
       </div>
+      {showDescendAffordance && row.kind === 'directory' ? (
+        <span aria-hidden="true" data-item-column-descend="true">
+          <Icon {...resolveIcon('file-tree-icon-chevron')} />
+        </span>
+      ) : null}
       {columns != null && columns.length > 0
         ? renderMetadataCells(row, targetPath, columns, metadata)
         : null}
@@ -976,16 +982,74 @@ function renderFileTreeRowContent(
           ) : null}
         </div>
       ) : null}
-      {showDescendAffordance && row.kind === 'directory' ? (
-        <span aria-hidden="true" data-item-column-descend="true">
-          <Icon {...resolveIcon('file-tree-icon-chevron')} />
-        </span>
-      ) : null}
     </Fragment>
   );
 }
 
 type FileTreeRenderedRowMode = FileTreeRowClickMode;
+
+// View-constant inputs for the row attribute lanes (metadata cells, custom
+// decoration, git status, action affordance). Built once per render pass and
+// shared by the active-pane rows and the columns-view side panes so a row
+// carries the same attributes no matter which pane renders it.
+type FileTreeRowLaneFrame = {
+  actionLaneEnabled: boolean;
+  columns: readonly FileTreeColumn[] | undefined;
+  directoriesWithGitChanges: ReadonlySet<string> | undefined;
+  gitLaneActive: boolean;
+  gitStatusByPath: ReadonlyMap<string, GitStatus> | undefined;
+  ignoredGitDirectories: ReadonlySet<string> | undefined;
+  ignoredInheritanceCache: Map<string, boolean>;
+  metadataByPath: ReadonlyMap<string, FileTreeItemMetadata> | undefined;
+  renderDecorationForRow: (
+    row: FileTreeVisibleRow,
+    targetPath: string
+  ) => FileTreeRowDecoration | null;
+  showDecorativeActionAffordance: boolean;
+};
+
+// Derives one row's lane state (git status, decorations, metadata) from the
+// lane frame. `renderStyledRow` and `renderExplorerColumnRow` both go through
+// here so the attribute lanes never diverge between pane roles.
+function computeRowLaneState(
+  lanes: FileTreeRowLaneFrame,
+  row: FileTreeVisibleRow,
+  targetPath: string
+): {
+  containsGitChange: boolean;
+  customDecoration: FileTreeRowDecoration | null;
+  decorationLaneEnabled: boolean;
+  effectiveGitStatus: GitStatus | null;
+  gitDecoration: FileTreeRowDecoration | null;
+  metadata: FileTreeItemMetadata | null;
+} {
+  const ownGitStatus = lanes.gitStatusByPath?.get(targetPath) ?? null;
+  const effectiveGitStatus =
+    ownGitStatus ??
+    getInheritedIgnoredGitStatus(
+      row.ancestorPaths,
+      lanes.ignoredGitDirectories,
+      lanes.ignoredInheritanceCache
+    );
+  const containsGitChange =
+    row.kind === 'directory' &&
+    (lanes.directoriesWithGitChanges?.has(targetPath) ?? false);
+  const customDecoration = lanes.renderDecorationForRow(row, targetPath);
+  return {
+    containsGitChange,
+    customDecoration,
+    decorationLaneEnabled:
+      customDecoration != null ||
+      lanes.gitLaneActive ||
+      lanes.actionLaneEnabled,
+    effectiveGitStatus,
+    gitDecoration: getBuiltInGitStatusDecoration(
+      effectiveGitStatus,
+      containsGitChange
+    ),
+    metadata: lanes.metadataByPath?.get(targetPath) ?? null,
+  };
+}
 
 // A frame captures everything that is constant across all rows in a single
 // render pass: the controller, feature flags, handlers, and ref registrars.
@@ -994,9 +1058,8 @@ type FileTreeRenderedRowMode = FileTreeRowClickMode;
 // flow paths can share the same logical invariants by passing in a frame
 // with a different `registerButton` target.
 type FileTreeRenderRowFrame = {
-  columns: readonly FileTreeColumn[] | undefined;
   controller: FileTreeController;
-  metadataByPath: ReadonlyMap<string, FileTreeItemMetadata> | undefined;
+  lanes: FileTreeRowLaneFrame;
   renameView: ReturnType<FileTreeController[typeof FILE_TREE_RENAME_VIEW]>;
   showDescendAffordance: boolean;
   viewMode: FileTreeViewMode;
@@ -1019,23 +1082,13 @@ type FileTreeRenderRowFrame = {
   ) => void;
   instanceId: string | undefined;
   itemHeight: number;
-  gitStatusByPath: ReadonlyMap<string, GitStatus> | undefined;
-  ignoredGitDirectories: ReadonlySet<string> | undefined;
-  ignoredInheritanceCache: Map<string, boolean>;
-  directoriesWithGitChanges: ReadonlySet<string> | undefined;
-  gitLaneActive: boolean;
   contextMenuEnabled: boolean;
   contextMenuTriggerMode: FileTreeContextMenuTriggerMode;
-  contextMenuButtonTriggerEnabled: boolean;
   contextMenuButtonVisibility: FileTreeContextMenuButtonVisibility;
   contextMenuRightClickEnabled: boolean;
   registerRenameInput: (element: HTMLInputElement | null) => void;
   registerButton: (path: string, element: HTMLElement | null) => void;
   resolveIcon: ReturnType<typeof createFileTreeIconResolver>['resolveIcon'];
-  renderDecorationForRow: (
-    row: FileTreeVisibleRow,
-    targetPath: string
-  ) => FileTreeRowDecoration | null;
   openContextMenuForRow: (
     row: FileTreeVisibleRow,
     targetPath: string,
@@ -1068,9 +1121,8 @@ function renderStyledRow(
   options: FileTreeRenderRowOptions = {}
 ): JSX.Element {
   const {
-    columns,
     controller,
-    metadataByPath,
+    lanes,
     renameView,
     showDescendAffordance,
     viewMode,
@@ -1085,20 +1137,13 @@ function renderStyledRow(
     handleRowTouchStart,
     instanceId,
     itemHeight,
-    gitStatusByPath,
-    ignoredGitDirectories,
-    ignoredInheritanceCache,
-    directoriesWithGitChanges,
-    gitLaneActive,
     contextMenuEnabled,
     contextMenuTriggerMode,
-    contextMenuButtonTriggerEnabled,
     contextMenuButtonVisibility,
     contextMenuRightClickEnabled,
     registerRenameInput,
     registerButton,
     resolveIcon,
-    renderDecorationForRow,
     openContextMenuForRow,
     onRowClick,
     onKeyDown,
@@ -1106,28 +1151,14 @@ function renderStyledRow(
   const targetPath = getFileTreeRowPath(row);
   const { isParked = false, mode = 'flow', style } = options;
   const isSticky = mode === 'sticky';
-  const ownGitStatus = gitStatusByPath?.get(targetPath) ?? null;
-  const effectiveGitStatus =
-    ownGitStatus ??
-    getInheritedIgnoredGitStatus(
-      row.ancestorPaths,
-      ignoredGitDirectories,
-      ignoredInheritanceCache
-    );
-  const containsGitChange =
-    row.kind === 'directory' &&
-    (directoriesWithGitChanges?.has(targetPath) ?? false);
-  const customDecoration = renderDecorationForRow(row, targetPath);
-  const gitDecoration = getBuiltInGitStatusDecoration(
+  const {
+    containsGitChange,
+    customDecoration,
+    decorationLaneEnabled,
     effectiveGitStatus,
-    containsGitChange
-  );
-  const actionLaneEnabled =
-    contextMenuEnabled && contextMenuButtonTriggerEnabled;
-  const decorationLaneEnabled =
-    customDecoration != null || gitLaneActive || actionLaneEnabled;
-  const showDecorativeActionAffordance =
-    actionLaneEnabled && contextMenuButtonVisibility === 'always';
+    gitDecoration,
+    metadata,
+  } = computeRowLaneState(lanes, row, targetPath);
   const renamingPath = renameView.getPath();
   const isRenamingRow = renamingPath === targetPath;
   const renamingValue = isRenamingRow ? renameView.getValue() : '';
@@ -1147,18 +1178,18 @@ function renderStyledRow(
       />
     );
   const rowContent = renderFileTreeRowContent(row, resolveIcon, {
-    actionLaneEnabled,
-    columns,
+    actionLaneEnabled: lanes.actionLaneEnabled,
+    columns: lanes.columns,
     customDecoration,
     decorationLaneEnabled,
     directoryIconName:
       viewMode !== 'tree' ? 'file-tree-icon-folder' : 'file-tree-icon-chevron',
     dragTargetFlattenedSegmentPath: dragTarget?.flattenedSegmentPath ?? null,
     gitDecoration,
-    gitLaneActive,
-    metadata: metadataByPath?.get(targetPath) ?? null,
+    gitLaneActive: lanes.gitLaneActive,
+    metadata,
     renameInput,
-    showDecorativeActionAffordance,
+    showDecorativeActionAffordance: lanes.showDecorativeActionAffordance,
     showDescendAffordance,
   });
   const attributeProps = computeFileTreeRowElementAttributes({
@@ -1169,15 +1200,15 @@ function renderStyledRow(
     extraStyle: style,
     viewMode,
     features: {
-      actionLaneEnabled,
-      contextMenuButtonVisibility: actionLaneEnabled
+      actionLaneEnabled: lanes.actionLaneEnabled,
+      contextMenuButtonVisibility: lanes.actionLaneEnabled
         ? contextMenuButtonVisibility
         : null,
       contextMenuEnabled,
       contextMenuTriggerMode: contextMenuEnabled
         ? contextMenuTriggerMode
         : null,
-      gitLaneActive,
+      gitLaneActive: lanes.gitLaneActive,
     },
     isParked,
     itemHeight,
@@ -1304,10 +1335,12 @@ function renderRangeChildren(
 
 // Renders one row of a columns-view side pane: the shared row contract minus
 // drag, rename, and context-menu wiring, plus the ancestor-chain highlight and
-// a descend affordance on directories.
+// a descend affordance on directories. Attribute lanes come from the same
+// lane frame as the active pane so a listing looks identical in every role.
 function renderExplorerColumnRow(
   row: FileTreeVisibleRow,
   column: FileTreeExplorerColumn,
+  lanes: FileTreeRowLaneFrame,
   itemHeight: number,
   resolveIcon: ReturnType<typeof createFileTreeIconResolver>['resolveIcon'],
   onRowClick: (event: MouseEvent, row: FileTreeVisibleRow) => void,
@@ -1315,23 +1348,31 @@ function renderExplorerColumnRow(
   key: string | number
 ): JSX.Element {
   const isChainSelected = row.path === column.selectedPath;
+  const {
+    containsGitChange,
+    customDecoration,
+    decorationLaneEnabled,
+    effectiveGitStatus,
+    gitDecoration,
+    metadata,
+  } = computeRowLaneState(lanes, row, row.path);
   const attributeProps = computeFileTreeRowElementAttributes({
     ariaLabel: getFileTreeRowAriaLabel(row),
     domId: undefined,
     features: {
-      actionLaneEnabled: false,
+      actionLaneEnabled: lanes.actionLaneEnabled,
       contextMenuButtonVisibility: null,
       contextMenuEnabled: false,
       contextMenuTriggerMode: null,
-      gitLaneActive: false,
+      gitLaneActive: lanes.gitLaneActive,
     },
     isParked: false,
     itemHeight,
     mode: 'flow',
     row,
     state: {
-      containsGitChange: false,
-      effectiveGitStatus: null,
+      containsGitChange,
+      effectiveGitStatus,
       isContextHovered: false,
       isDragTarget: false,
       isDragging: false,
@@ -1353,7 +1394,15 @@ function renderExplorerColumnRow(
       }}
     >
       {renderFileTreeRowContent(row, resolveIcon, {
+        actionLaneEnabled: lanes.actionLaneEnabled,
+        columns: lanes.columns,
+        customDecoration,
+        decorationLaneEnabled,
         directoryIconName: 'file-tree-icon-folder',
+        gitDecoration,
+        gitLaneActive: lanes.gitLaneActive,
+        metadata,
+        showDecorativeActionAffordance: lanes.showDecorativeActionAffordance,
         showDescendAffordance,
       })}
     </button>
@@ -1365,6 +1414,7 @@ type FileTreeSideColumnProps = {
   controller: FileTreeController;
   initialViewportHeight: number;
   itemHeight: number;
+  lanes: FileTreeRowLaneFrame;
   onRowClick: (event: MouseEvent, row: FileTreeVisibleRow) => void;
   overscan: number;
   resolveIcon: ReturnType<typeof createFileTreeIconResolver>['resolveIcon'];
@@ -1380,6 +1430,7 @@ function FileTreeSideColumn({
   controller,
   initialViewportHeight,
   itemHeight,
+  lanes,
   onRowClick,
   overscan,
   resolveIcon,
@@ -1496,6 +1547,7 @@ function FileTreeSideColumn({
             renderExplorerColumnRow(
               row,
               column,
+              lanes,
               itemHeight,
               resolveIcon,
               onRowClick,
@@ -4008,33 +4060,43 @@ export function FileTreeView({
     });
   };
 
+  // The row attribute lanes shared by the active pane and the columns-view
+  // side panes; see FileTreeRowLaneFrame.
+  const actionLaneEnabled =
+    contextMenuEnabled && contextMenuButtonTriggerEnabled;
+  const rowLanes: FileTreeRowLaneFrame = {
+    actionLaneEnabled,
+    columns: metadataColumns,
+    directoriesWithGitChanges,
+    gitLaneActive,
+    gitStatusByPath,
+    ignoredGitDirectories,
+    ignoredInheritanceCache,
+    metadataByPath,
+    renderDecorationForRow,
+    showDecorativeActionAffordance:
+      actionLaneEnabled && contextMenuButtonVisibility === 'always',
+  };
   // Everything renderStyledRow needs that does not vary per row. Splitting
   // sticky vs flow here means the two paths share an identical contract except
   // for where each ref is registered, which is the invariant sticky reuse
   // depends on.
   const flowRowFrame: FileTreeRenderRowFrame = {
-    columns: metadataColumns,
     contextHoverPath: visualContextHoverPath,
     showDescendAffordance: descendAffordanceEnabled,
-    contextMenuButtonTriggerEnabled,
     contextMenuButtonVisibility,
     contextMenuEnabled,
     contextMenuRightClickEnabled,
     contextMenuTriggerMode,
     controller,
-    metadataByPath,
+    lanes: rowLanes,
     viewMode,
-    directoriesWithGitChanges,
     dragAndDropEnabled,
     draggedPathSet,
     dragTarget,
-    gitLaneActive,
-    gitStatusByPath,
     handleRowDragEnd,
     handleRowDragStart,
     handleRowTouchStart,
-    ignoredGitDirectories,
-    ignoredInheritanceCache,
     instanceId,
     itemHeight,
     onKeyDown: handleTreeKeyDown,
@@ -4043,7 +4105,6 @@ export function FileTreeView({
     registerButton: registerRowButton,
     registerRenameInput,
     renameView,
-    renderDecorationForRow,
     resolveIcon,
     shouldSuppressContextMenu,
     visualFocusPath,
@@ -4204,6 +4265,7 @@ export function FileTreeView({
               controller={controller}
               initialViewportHeight={initialViewportHeight}
               itemHeight={itemHeight}
+              lanes={rowLanes}
               onRowClick={handleColumnRowClick}
               overscan={overscan}
               resolveIcon={resolveIcon}
@@ -4321,6 +4383,7 @@ export function FileTreeView({
             controller={controller}
             initialViewportHeight={initialViewportHeight}
             itemHeight={itemHeight}
+            lanes={rowLanes}
             onRowClick={handleColumnRowClick}
             overscan={overscan}
             resolveIcon={resolveIcon}
