@@ -1,11 +1,17 @@
-import { parseDiffFromFile } from '@pierre/diffs';
+import {
+  type CodeViewItem,
+  type FileDiffMetadata,
+  parseDiffFromFile,
+} from '@pierre/diffs';
 import type { PreloadFileDiffOptions } from '@pierre/diffs/ssr';
 
+import type { PlaygroundUrlState } from './searchParams';
 import { CustomScrollbarCSS } from '@/components/CustomScrollbarCSS';
 
 export interface PlaygroundAnnotationMetadata {
   key: string;
   isThread: boolean;
+  body?: string;
 }
 
 // Multi-hunk diff: edits at top, middle (annotation on new line 25), and
@@ -107,31 +113,353 @@ export async function deleteUser(id: string): Promise<void> {
 
 `;
 
-export const PLAYGROUND_DIFF: PreloadFileDiffOptions<PlaygroundAnnotationMetadata> =
+// Diagnostics for the playground's edit-mode marker toggle. Positions are
+// zero-based line/character ranges into NEW_USERS_CONTENT (the diff's editable
+// new-file side), so keep them in sync if that content changes. Severities are
+// `as const` so the literals satisfy the editor's MarkerSeverity union without
+// importing the Marker type (mirrors _edit/constants.ts MARKER_DEMO_MARKERS).
+// Covers all four severities so the toggle exercises every marker color.
+export const PLAYGROUND_MARKERS = [
   {
-    fileDiff: parseDiffFromFile(
-      {
-        name: 'api/users.ts',
-        contents: OLD_USERS_CONTENT,
-      },
-      {
-        name: 'api/users.ts',
-        contents: NEW_USERS_CONTENT,
-      }
-    ),
+    severity: 'error' as const,
+    source: 'ts',
+    message: "Module './utils' has no exported member 'hashPassword'.",
+    start: { line: 8, character: 24 },
+    end: { line: 8, character: 36 },
+  },
+  {
+    severity: 'info' as const,
+    source: 'ts',
+    message: "'user' is declared here; consider narrowing before use.",
+    start: { line: 18, character: 8 },
+    end: { line: 18, character: 12 },
+  },
+  {
+    severity: 'warning' as const,
+    source: 'eslint',
+    message: 'Prefer a custom error subclass over the generic Error.',
+    start: { line: 22, character: 14 },
+    end: { line: 22, character: 19 },
+  },
+  {
+    severity: 'hint' as const,
+    source: 'eslint',
+    message: 'Redundant comment; the guard above already documents this.',
+    start: { line: 24, character: 2 },
+    end: { line: 24, character: 14 },
+  },
+];
+
+const PLAYGROUND_FILE_DIFF = parseDiffFromFile(
+  {
+    name: 'api/users.ts',
+    contents: OLD_USERS_CONTENT,
+  },
+  {
+    name: 'api/users.ts',
+    contents: NEW_USERS_CONTENT,
+  }
+);
+
+const PLAYGROUND_ANNOTATIONS = [
+  {
+    side: 'additions',
+    lineNumber: 25,
+    metadata: {
+      key: 'additions-25',
+      isThread: true,
+    },
+  },
+] satisfies PreloadFileDiffOptions<PlaygroundAnnotationMetadata>['annotations'];
+
+// Maps the shared URL state onto the preload options, so the prerendered
+// markup matches what the client derives from the same querystring — the
+// markup paints before hydration, and a drifted option would show the
+// server's presentation until the first client repaint. `colorMode` maps to
+// themeType directly: 'system' ships both themes and resolves via the native
+// CSS `light-dark()` against the pre-paint color-scheme, so no flash when
+// the client theme controller settles.
+export function getPlaygroundPreloadOptions(
+  state: PlaygroundUrlState
+): PreloadFileDiffOptions<PlaygroundAnnotationMetadata> {
+  return {
+    fileDiff: PLAYGROUND_FILE_DIFF,
     options: {
-      theme: 'pierre-dark',
-      diffStyle: 'split',
+      theme: { dark: state.darkTheme, light: state.lightTheme },
+      themeType: state.colorMode,
+      diffStyle: state.diffStyle,
+      overflow: state.overflow,
+      diffIndicators: state.diffIndicators,
+      lineDiffType: state.lineDiffType,
+      hunkSeparators: state.hunkSeparators,
+      disableBackground: state.disableBackground,
+      disableLineNumbers: state.disableLineNumbers,
       unsafeCSS: CustomScrollbarCSS,
     },
-    annotations: [
-      {
-        side: 'additions',
-        lineNumber: 25,
-        metadata: {
-          key: 'additions-25',
-          isThread: true,
-        },
-      },
-    ],
+    annotations: state.showAnnotations ? PLAYGROUND_ANNOTATIONS : [],
   };
+}
+
+// -----------------------------------------------------------------------------
+// Multi-item fixtures for the Virtualizer and CodeView playground modes.
+//
+// Every diff below is built with `parseDiffFromFile` from complete old/new file
+// contents, so they are full (non-partial) diffs. Partial diffs (e.g. from
+// `parsePatchFiles`) would need a `loadDiffFiles` loader to hydrate, which these
+// demo surfaces intentionally avoid.
+// -----------------------------------------------------------------------------
+
+const OLD_STYLES_CONTENT = `.button {
+  padding: 8px 12px;
+  border-radius: 4px;
+  background: #3b82f6;
+  color: #ffffff;
+}
+
+.button:hover {
+  background: #2563eb;
+}
+
+.card {
+  border: 1px solid #e5e7eb;
+  padding: 16px;
+}
+`;
+
+const NEW_STYLES_CONTENT = `.button {
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: #6366f1;
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.button:hover {
+  background: #4f46e5;
+  transform: translateY(-1px);
+}
+
+.card {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+`;
+
+const OLD_README_CONTENT = `# users API
+
+Basic CRUD helpers for user records.
+
+- getUser
+- createUser
+- deleteUser
+`;
+
+const NEW_README_CONTENT = `# Users API
+
+CRUD helpers for user records, backed by the shared database client.
+
+## API
+
+- \`getUser(id)\` – fetch a single user, throws when missing
+- \`createUser(email, name)\` – validates the email before insert
+- \`deleteUser(id)\` – idempotent delete
+
+## Usage
+
+\`\`\`ts
+import { getUser } from './api/users';
+
+const user = await getUser('123');
+\`\`\`
+`;
+
+// Nested markup with meaningful indentation, for exercising edit-mode diff
+// alignment: wrapping/unwrapping containers, pushing lines around with
+// Enter, and re-indenting all reshape change blocks whose lines differ only
+// (or mostly) in whitespace. The unchanged middle keeps a collapsible gap
+// between the changed regions.
+const OLD_MARKUP_CONTENT = `<section class="profile">
+  <header class="profile-header">
+    <div class="avatar-wrap">
+      <img src="/avatars/ada.png" alt="Ada Lovelace" />
+    </div>
+    <h2 class="profile-name">Ada Lovelace</h2>
+  </header>
+  <div class="profile-body">
+    <p class="bio">Mathematician and writer.</p>
+    <ul class="links">
+      <li>
+        <a href="/notes">Notes</a>
+      </li>
+      <li>
+        <a href="/programs">Programs</a>
+      </li>
+      <li>
+        <a href="/letters">Letters</a>
+      </li>
+    </ul>
+    <div class="stats">
+      <span class="stat">12 notes</span>
+      <span class="stat">3 programs</span>
+    </div>
+  </div>
+  <footer class="profile-footer">
+    <button class="follow">Follow</button>
+  </footer>
+</section>
+`;
+
+const NEW_MARKUP_CONTENT = `<section class="profile profile--wide">
+  <header class="profile-header">
+    <img src="/avatars/ada.png" alt="Ada Lovelace" />
+    <h2 class="profile-name">Ada Lovelace</h2>
+  </header>
+  <div class="profile-body">
+    <p class="bio">Mathematician and writer.</p>
+    <ul class="links">
+      <li>
+        <a href="/notes">Notes</a>
+      </li>
+      <li>
+        <a href="/programs">Programs</a>
+      </li>
+      <li>
+        <a href="/letters">Letters</a>
+      </li>
+    </ul>
+    <div class="stats">
+      <span class="stat">12 notes</span>
+      <span class="stat">3 programs</span>
+    </div>
+  </div>
+  <footer class="profile-footer">
+    <button class="follow" type="button">Follow</button>
+  </footer>
+</section>
+`;
+
+// The base files are replicated into several uniquely-named variants so the
+// Virtualizer and CodeView demos have enough content to scroll through. Each
+// variant is a full (non-partial) diff parsed from complete old/new contents.
+const DIFF_VARIANT_COUNT = 4;
+
+interface BaseDiff {
+  name: string;
+  oldContents: string;
+  newContents: string;
+}
+
+const USERS_BASE: BaseDiff = {
+  name: 'api/users.ts',
+  oldContents: OLD_USERS_CONTENT,
+  newContents: NEW_USERS_CONTENT,
+};
+
+const STYLES_BASE: BaseDiff = {
+  name: 'ui/button.css',
+  oldContents: OLD_STYLES_CONTENT,
+  newContents: NEW_STYLES_CONTENT,
+};
+
+const README_BASE: BaseDiff = {
+  name: 'README.md',
+  oldContents: OLD_README_CONTENT,
+  newContents: NEW_README_CONTENT,
+};
+
+const MARKUP_BASE: BaseDiff = {
+  name: 'ui/profile-card.html',
+  oldContents: OLD_MARKUP_CONTENT,
+  newContents: NEW_MARKUP_CONTENT,
+};
+
+const BASE_DIFFS: BaseDiff[] = [
+  USERS_BASE,
+  MARKUP_BASE,
+  STYLES_BASE,
+  README_BASE,
+];
+
+// Appends a variant index before the file extension (e.g. `users.ts` ->
+// `users-2.ts`) so each replicated file has a distinct name and id.
+function variantName(name: string, index: number): string {
+  if (index === 0) {
+    return name;
+  }
+  const dot = name.lastIndexOf('.');
+  return dot === -1
+    ? `${name}-${index}`
+    : `${name.slice(0, dot)}-${index}${name.slice(dot)}`;
+}
+
+function variantDiff(base: BaseDiff, index: number): FileDiffMetadata {
+  const name = variantName(base.name, index);
+  return parseDiffFromFile(
+    { name, contents: base.oldContents },
+    { name, contents: base.newContents }
+  );
+}
+
+// Diffs rendered as a list in the Virtualizer (window/body scroll) mode.
+export const VIRTUALIZER_FILE_DIFFS: FileDiffMetadata[] = Array.from(
+  { length: DIFF_VARIANT_COUNT },
+  (_, index) => BASE_DIFFS.map((base) => variantDiff(base, index))
+).flat();
+
+// Items rendered in the CodeView mode: each variant contributes two diffs and a
+// plain file so the demo shows both item types scrolling within CodeView's own
+// scroll container.
+export const CODE_VIEW_ITEMS: CodeViewItem<PlaygroundAnnotationMetadata>[] =
+  Array.from(
+    { length: DIFF_VARIANT_COUNT },
+    (_, index): CodeViewItem<PlaygroundAnnotationMetadata>[] => {
+      const readmeName = variantName('README.md', index);
+      return [
+        {
+          id: `diff:${variantName(USERS_BASE.name, index)}`,
+          type: 'diff',
+          fileDiff: variantDiff(USERS_BASE, index),
+        },
+        {
+          id: `diff:${variantName(MARKUP_BASE.name, index)}`,
+          type: 'diff',
+          fileDiff: variantDiff(MARKUP_BASE, index),
+        },
+        {
+          id: `file:${readmeName}`,
+          type: 'file',
+          file: { name: readmeName, contents: NEW_README_CONTENT },
+        },
+        {
+          id: `diff:${variantName(STYLES_BASE.name, index)}`,
+          type: 'diff',
+          fileDiff: variantDiff(STYLES_BASE, index),
+        },
+      ];
+    }
+  ).flat();
+
+export const ITEM_UNSAFE_CSS = `${CustomScrollbarCSS}
+[data-diffs-header] {
+  box-shadow: 0 -1px 0 var(--color-border);
+}
+
+[data-diffs-header] {
+  container-type: scroll-state;
+  container-name: sticky-header;
+}
+
+@container sticky-header scroll-state(stuck: top) {
+  [data-diffs-header]::after {
+    position: absolute;
+    bottom: -1px;
+    left: 0;
+    width: 100%;
+    height: 1px;
+    content: '';
+    background-color: var(--color-border);
+  }
+}
+`;

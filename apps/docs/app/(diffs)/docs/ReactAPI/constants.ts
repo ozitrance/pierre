@@ -78,6 +78,7 @@ export const REACT_API_SHARED_DIFF_OPTIONS: PreloadFileOptions<undefined> = {
 import type {
   DiffTokenEventBaseProps,
   FileDiff as FileDiffClass,
+  FileDiffContentsLoader,
   PostRenderPhase,
 } from '@pierre/diffs';
 import { MultiFileDiff } from '@pierre/diffs/react';
@@ -158,6 +159,11 @@ interface DiffOptions {
 
   // Lines revealed per click when expanding collapsed regions
   expansionLineCount: 100,
+
+  // Load full contents for partial changed/renamed diffs parsed from patches.
+  // Return both sides for changed diffs and oldFile: null for pure renames.
+  // Added/deleted diffs do not need to be hydrated.
+  loadDiffFiles?: FileDiffContentsLoader,
 
   // Auto-expand collapsed context regions at or below this size
   // (default: 1)
@@ -312,12 +318,47 @@ interface DiffOptions {
   // Fires on pointer up only:
   // - click => single-line range
   // - drag => final range at release
-  // Selection callbacks can still fire when line selection is enabled.
+  // Selection lifecycle callbacks also fire for a gutter utility gesture,
+  // even when line selection is disabled.
   // Can click a single line or apply to a drag interaction started pointer
   // down on the button
   onGutterUtilityClick(range: SelectedLineRange) {
     console.log(range.start, range.end, range.side, range.endSide);
   },
+}`,
+  },
+  options,
+};
+
+export const REACT_API_LOAD_DIFF_FILES: PreloadFileOptions<undefined> = {
+  file: {
+    name: 'load_diff_files.tsx',
+    contents: `import {
+  FileDiff,
+  type FileDiffLoadedFiles,
+  parsePatchFiles,
+} from '@pierre/diffs/react';
+
+const [patch] = parsePatchFiles(patchText, 'pull-42');
+const fileDiff = patch.files[0];
+
+function ReviewDiff() {
+  return (
+    <FileDiff
+      fileDiff={fileDiff}
+      options={{
+        async loadDiffFiles(fileDiff): Promise<FileDiffLoadedFiles> {
+          const response = await fetch(
+            '/api/files?path=' + encodeURIComponent(fileDiff.name)
+          );
+          // Return { oldFile, newFile }, or { oldFile: null, newFile }
+          // for pure renames.
+          // Include cacheKey values that change with revision or content.
+          return response.json();
+        },
+      }}
+    />
+  );
 }`,
   },
   options,
@@ -376,16 +417,22 @@ interface ThreadMetadata {
   // ─────────────────────────────────────────────────────────────
 
   // All diff header render callbacks receive FileDiffMetadata directly.
-  // This includes renderCustomHeader, renderHeaderPrefix, and
-  // renderHeaderMetadata.
+  // This includes renderCustomHeader, renderHeaderPrefix,
+  // renderHeaderFilenameSuffix, and renderHeaderMetadata.
   // renderHeaderPrefix renders at the beginning of the built-in header,
   // before the filename.
+  // renderHeaderFilenameSuffix renders immediately after the displayed filename.
   // renderHeaderMetadata renders at the end of the built-in header,
   // after the +/- line metrics.
   // renderCustomHeader replaces the built-in header content entirely.
   //
-  // Render custom content on the right side of the built-in header.
   // Callback arg: FileDiffMetadata
+  // Render custom content at the beginning of the built-in header.
+  renderHeaderPrefix={(fileDiff) => (
+    <span>{fileDiff.type}</span>
+  )}
+
+  // Render custom content on the right side of the built-in header.
   renderHeaderMetadata={(fileDiff) => (
     <span>{fileDiff.name}</span>
   )}
@@ -400,7 +447,8 @@ interface ThreadMetadata {
   // Fires on pointer up only:
   // - click => single-line range
   // - drag => final range at release
-  // Selection callbacks can still fire when line selection is enabled.
+  // Selection lifecycle callbacks also fire for a gutter utility gesture,
+  // even when line selection is disabled.
   // Can click a single line or apply to a drag interaction started pointer
   // down on the button
   onGutterUtilityClick={(range) => {
@@ -472,8 +520,8 @@ export const REACT_API_MULTI_FILE_DIFF: PreloadFileOptions<undefined> = {
   MultiFileDiff,
 } from '@pierre/diffs/react';
 
-// MultiFileDiff compares two file versions directly.
-// Use this when you have the old and new file contents.
+// MultiFileDiff compares file contents directly.
+// Use this when you have the old and/or new file contents.
 
 // Keep file objects stable (useState/useMemo) to avoid re-renders.
 // The component uses reference equality for change detection.
@@ -490,7 +538,9 @@ const newFile: FileContents = {
 export function MyDiff() {
   return (
     <MultiFileDiff
-      // Required: the two file versions to compare
+      // Required: pass FileContents for existing sides.
+      // Use oldFile={null} for a new file or newFile={null}
+      // for a deleted file.
       oldFile={oldFile}
       newFile={newFile}
 
@@ -500,7 +550,8 @@ export function MyDiff() {
       }}
 
       // See "Shared Props" tabs for all available props:
-      // lineAnnotations, renderAnnotation, renderHeaderMetadata,
+      // lineAnnotations, renderAnnotation, renderHeaderPrefix,
+      // renderHeaderFilenameSuffix, renderHeaderMetadata,
       // renderGutterUtility, selectedLines, className, style, etc.
     />
   );
@@ -537,7 +588,8 @@ export function MyPatchDiff() {
       }}
 
       // See "Shared Props" tabs for all available props:
-      // lineAnnotations, renderAnnotation, renderHeaderMetadata,
+      // lineAnnotations, renderAnnotation, renderHeaderPrefix,
+      // renderHeaderFilenameSuffix, renderHeaderMetadata,
       // renderGutterUtility, selectedLines, className, style, etc.
     />
   );
@@ -579,7 +631,8 @@ export function MyFileDiff() {
       }}
 
       // See "Shared Props" tabs for all available props:
-      // lineAnnotations, renderAnnotation, renderHeaderMetadata,
+      // lineAnnotations, renderAnnotation, renderHeaderPrefix,
+      // renderHeaderFilenameSuffix, renderHeaderMetadata,
       // renderGutterUtility, selectedLines, className, style, etc.
     />
   );
@@ -623,7 +676,8 @@ export function CodeFile() {
       }}
 
       // The File component supports similar props to the diff components:
-      // lineAnnotations, renderAnnotation, renderHeaderMetadata,
+      // lineAnnotations, renderAnnotation, renderHeaderPrefix,
+      // renderHeaderFilenameSuffix, renderHeaderMetadata,
       // renderGutterUtility, selectedLines, className, style, etc.
       //
       // Key difference: File uses LineAnnotation (no 'side' property)
@@ -943,7 +997,8 @@ interface FileOptions {
   // Fires on pointer up only:
   // - click => single-line range
   // - drag => final range at release
-  // Selection callbacks can still fire when line selection is enabled.
+  // Selection lifecycle callbacks also fire for a gutter utility gesture,
+  // even when line selection is disabled.
   // Can click a single line or apply to a drag interaction started pointer
   // down on the button
   onGutterUtilityClick(range: SelectedLineRange) {
@@ -1010,10 +1065,16 @@ interface CommentMetadata {
   // File header callbacks receive FileContents directly.
   // renderHeaderPrefix renders at the beginning of the built-in header,
   // before the filename.
+  // renderHeaderFilenameSuffix renders immediately after the displayed filename.
   // renderHeaderMetadata renders at the end of the built-in header.
   // renderCustomHeader replaces the built-in header content entirely.
   // Callback arg: FileContents
   //
+  // Render custom content at the beginning of the built-in header.
+  renderHeaderPrefix={(file) => (
+    <span>{file.name.endsWith('.generated.ts') ? 'Generated' : 'Source'}</span>
+  )}
+
   // Render custom content on the right side of the built-in header.
   renderHeaderMetadata={(file) => (
     <span>{file.name}</span>
@@ -1029,7 +1090,8 @@ interface CommentMetadata {
   // Fires on pointer up only:
   // - click => single-line range
   // - drag => final range at release
-  // Selection callbacks can still fire when line selection is enabled.
+  // Selection lifecycle callbacks also fire for a gutter utility gesture,
+  // even when line selection is disabled.
   // Can click a single line or apply to a drag interaction started pointer
   // down on the button
   onGutterUtilityClick={(range) => {

@@ -20,10 +20,12 @@ export function File<LAnnotation = undefined>({
   renderAnnotation,
   renderCustomHeader,
   renderHeaderPrefix,
+  renderHeaderFilenameSuffix,
   renderHeaderMetadata,
   prerenderedHTML,
   renderGutterUtility,
   disableWorkerPool = false,
+  contentEditable = false,
 }: FileProps<LAnnotation>): React.JSX.Element {
   const { ref, getHoveredLine } = useFileInstance({
     file,
@@ -35,12 +37,14 @@ export function File<LAnnotation = undefined>({
     hasGutterRenderUtility: renderGutterUtility != null,
     hasCustomHeader: renderCustomHeader != null,
     disableWorkerPool,
+    contentEditable,
   });
   const children = renderFileChildren({
     file,
     renderAnnotation,
     renderCustomHeader,
     renderHeaderPrefix,
+    renderHeaderFilenameSuffix,
     renderHeaderMetadata,
     renderGutterUtility,
     lineAnnotations,

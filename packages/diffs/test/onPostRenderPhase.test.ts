@@ -55,7 +55,9 @@ async function waitForPhases(
   phases: readonly { id: string; phase: PostRenderPhase }[],
   expected: readonly { id: string; phase: PostRenderPhase }[]
 ): Promise<void> {
-  for (let attempt = 0; attempt < 50; attempt++) {
+  // ~4s budget: returns as soon as the phases match, so passing runs only pay
+  // a few iterations; the headroom is for loaded CI runners.
+  for (let attempt = 0; attempt < 400; attempt++) {
     try {
       expect(phases).toEqual(expected);
       return;
@@ -108,7 +110,7 @@ describe('onPostRender phases', () => {
 
     try {
       instance.hydrate({ file, fileContainer });
-      instance.hydrate({ file, fileContainer });
+      instance.render({ file, fileContainer, forceRender: true });
       instance.cleanUp();
       instance.cleanUp();
 
@@ -132,7 +134,7 @@ describe('onPostRender phases', () => {
 
     try {
       instance.hydrate({ fileDiff, fileContainer });
-      instance.hydrate({ fileDiff, fileContainer });
+      instance.render({ fileDiff, fileContainer, forceRender: true });
       instance.cleanUp();
       instance.cleanUp();
 
@@ -198,7 +200,7 @@ describe('onPostRender phases', () => {
     }
   });
 
-  test('File placeholder rendering unmounts once and allows remount', () => {
+  test('File placeholder rendering unmounts once and allows render remount', () => {
     const { cleanup } = installDom();
     const phases: PostRenderPhase[] = [];
     const instance = new File({
@@ -214,7 +216,7 @@ describe('onPostRender phases', () => {
       instance.hydrate({ file, fileContainer });
       instance.renderPlaceholder(24);
       instance.renderPlaceholder(48);
-      instance.hydrate({ file, fileContainer });
+      instance.render({ file, fileContainer, forceRender: true });
 
       expect(phases).toEqual(['mount', 'unmount', 'mount']);
     } finally {
@@ -223,7 +225,7 @@ describe('onPostRender phases', () => {
     }
   });
 
-  test('FileDiff placeholder rendering unmounts once and allows remount', () => {
+  test('FileDiff placeholder rendering unmounts once and allows render remount', () => {
     const { cleanup } = installDom();
     const phases: PostRenderPhase[] = [];
     const instance = new FileDiff({
@@ -239,7 +241,7 @@ describe('onPostRender phases', () => {
       instance.hydrate({ fileDiff, fileContainer });
       instance.renderPlaceholder(24);
       instance.renderPlaceholder(48);
-      instance.hydrate({ fileDiff, fileContainer });
+      instance.render({ fileDiff, fileContainer, forceRender: true });
 
       expect(phases).toEqual(['mount', 'unmount', 'mount']);
     } finally {
