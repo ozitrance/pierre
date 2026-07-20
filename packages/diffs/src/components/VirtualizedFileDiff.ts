@@ -1,7 +1,10 @@
 import { DEFAULT_COLLAPSED_CONTEXT_THRESHOLD } from '../constants';
 import type {
+  BaseDiffOptions,
   DiffLineAnnotation,
+  DiffsTextDocument,
   ExpansionDirections,
+  FileContents,
   FileDiffMetadata,
   Hunk,
   HunkSeparators,
@@ -15,14 +18,18 @@ import type {
   VirtualFileMetrics,
 } from '../types';
 import { areDiffTargetsEqual } from '../utils/areDiffTargetsEqual';
+import { areFilesEqual } from '../utils/areFilesEqual';
 import { areObjectsEqual } from '../utils/areObjectsEqual';
 import { areOptionsEqual } from '../utils/areOptionsEqual';
+import { awaitWithTimeout } from '../utils/awaitWithTimeout';
 import { computeEstimatedDiffHeights } from '../utils/computeEstimatedDiffHeights';
 import {
   computeVirtualFileMetrics,
   getVirtualFileHeaderRegion,
   getVirtualFilePaddingBottom,
 } from '../utils/computeVirtualFileMetrics';
+import { getDiffFileInput } from '../utils/getDiffFileInput';
+import { hydratePartialDiff } from '../utils/hydratePartialDiff';
 import {
   FILE_ANNOTATION_DOM_KEY,
   FILE_ANNOTATION_LINE_NUMBER,
@@ -36,6 +43,7 @@ import {
   getLeadingHunkSeparatorLayout,
   getTrailingExpandedRegion,
   getTrailingHunkSeparatorLayout,
+  isAdditionLineRenderable,
 } from '../utils/virtualDiffLayout';
 import type { WorkerPoolManager } from '../worker';
 import type { CodeView } from './CodeView';
@@ -45,6 +53,10 @@ import {
   type FileDiffRenderProps,
 } from './FileDiff';
 import type { Virtualizer } from './Virtualizer';
+
+type LoadedPartialDiffContents = Awaited<
+  ReturnType<NonNullable<BaseDiffOptions['loadDiffFiles']>>
+>;
 
 interface DiffLayoutCheckpoint {
   renderedLineIndex: number;
@@ -77,9 +89,22 @@ interface DiffLayoutCache {
 interface ResetLayoutCacheOptions {
   forceSimpleRecompute?: boolean;
   includeEstimatedHeights?: boolean;
+  resetRenderRange?: boolean;
 }
 
-const LAYOUT_CHECKPOINT_INTERVAL = 5_000;
+interface PendingLoadedDiff {
+  expectedDiff: FileDiffMetadata;
+  nextDiff: FileDiffMetadata;
+  files: LoadedPartialDiffContents;
+}
+
+interface PendingExpansion {
+  hunkIndex: number;
+  direction: ExpansionDirections;
+  expansionLineCountOverride: number | undefined;
+}
+
+export const VIRTUALIZED_FILE_DIFF_LAYOUT_CHECKPOINT_INTERVAL = 3_000;
 
 let instanceId = -1;
 
@@ -106,6 +131,9 @@ export class VirtualizedFileDiff<
   private layoutDirty = true;
   private forceRenderOverride: true | undefined;
   private currentCollapsed: boolean | undefined;
+  private currentExpandUnchanged: boolean | undefined;
+  private pendingHydratedDiff: PendingLoadedDiff | undefined;
+  private pendingExpansions: PendingExpansion[] | undefined;
 
   constructor(
     options: FileDiffOptions<LAnnotation> | undefined,
@@ -247,6 +275,7 @@ export class VirtualizedFileDiff<
   private resetLayoutCache({
     forceSimpleRecompute = false,
     includeEstimatedHeights = false,
+    resetRenderRange = true,
   }: ResetLayoutCacheOptions = {}): void {
     this.layoutDirty = true;
     this.cache.fileAnnotationHeight = 0;
@@ -256,6 +285,22 @@ export class VirtualizedFileDiff<
     if (this.cache.measuredHeightDeltaTotal !== 0) {
       this.cache.measuredHeightDeltaTotal = 0;
     }
+    this.invalidateDerivedLayoutCache(
+      includeEstimatedHeights,
+      resetRenderRange
+    );
+    // NOTE(amadeus): In CodeView we intentionally batch computes to all happen
+    // at the same time, so we shouldn't trigger this there.
+    if (forceSimpleRecompute && this.isSimpleMode()) {
+      this.computeApproximateSize();
+    }
+  }
+
+  private invalidateDerivedLayoutCache(
+    includeEstimatedHeights: boolean,
+    resetRenderRange = true
+  ): void {
+    this.layoutDirty = true;
     if (this.cache.checkpoints.length > 0) {
       this.cache.checkpoints.length = 0;
     }
@@ -266,13 +311,8 @@ export class VirtualizedFileDiff<
       this.cache.estimatedSplitHeight = undefined;
       this.cache.estimatedUnifiedHeight = undefined;
     }
-    if (this.renderRange != null) {
+    if (this.renderRange != null && resetRenderRange) {
       this.renderRange = undefined;
-    }
-    // NOTE(amadeus): In CodeView we intentionally batch computes to all happen
-    // at the same time, so we shouldn't trigger this there.
-    if (forceSimpleRecompute && this.isSimpleMode()) {
-      this.computeApproximateSize();
     }
   }
 
@@ -383,6 +423,15 @@ export class VirtualizedFileDiff<
     return this.render();
   };
 
+  // Virtualized renders bypass FileDiff's queued render handler. Apply line
+  // state deferred during the refresh once managers target the rebuilt rows.
+  public override flushManagers(): void {
+    super.flushManagers();
+    if (this.lineStateRefreshPending) {
+      this.flushDeferredLineState();
+    }
+  }
+
   // Prepares this item for CodeView layout by binding the latest diff, syncing
   // its virtualized top, and returning an approximate height. This method is
   // called while downstream items are being re-positioned, so later changes
@@ -410,10 +459,22 @@ export class VirtualizedFileDiff<
       includeEstimatedHeights = true;
     }
 
-    const { collapsed = false } = this.options;
+    const { collapsed = false, expandUnchanged = false } = this.options;
     if (this.currentCollapsed !== collapsed) {
       this.currentCollapsed = collapsed;
       shouldResetLayoutCache = true;
+    }
+
+    // CodeView's options facade forces expandUnchanged on while this item is
+    // in edit mode, so the effective value can flip without any option or
+    // target change reaching this instance. The estimated heights bake
+    // expansion in, so a flip must rebuild the layout caches just like a
+    // collapsed change — otherwise the item keeps its collapsed-layout height
+    // while (re)mounts render the expanded rows, overlapping the items below.
+    if (this.currentExpandUnchanged !== expandUnchanged) {
+      this.currentExpandUnchanged = expandUnchanged;
+      shouldResetLayoutCache = true;
+      includeEstimatedHeights = true;
     }
 
     if (shouldResetLayoutCache) {
@@ -549,6 +610,11 @@ export class VirtualizedFileDiff<
     });
 
     return position;
+  }
+
+  public getScrollContainer(): HTMLElement | undefined {
+    const root = this.getSimpleVirtualizer()?.getRoot();
+    return root instanceof HTMLElement ? root : root?.documentElement;
   }
 
   public getNumericScrollAnchor(
@@ -719,6 +785,8 @@ export class VirtualizedFileDiff<
     }
     if (!recycle) {
       this.resetLayoutCache({ includeEstimatedHeights: true });
+      this.pendingExpansions = undefined;
+      this.pendingHydratedDiff = undefined;
     }
     this.isSetup = false;
     super.cleanUp(recycle);
@@ -729,18 +797,198 @@ export class VirtualizedFileDiff<
     direction: ExpansionDirections,
     expansionLineCountOverride?: number
   ): void => {
-    this.hunksRenderer.expandHunk(
-      hunkIndex,
-      direction,
-      expansionLineCountOverride
-    );
-    this.forceRenderOverride = true;
-    this.resetLayoutCache({ includeEstimatedHeights: true });
-    if (this.isSimpleMode()) {
+    if (this.fileDiff == null) {
+      return;
+    }
+    if (this.isAdvancedMode()) {
+      this.pendingExpansions ??= [];
+      this.pendingExpansions.push({
+        hunkIndex,
+        direction,
+        expansionLineCountOverride,
+      });
+    } else {
+      this.hunksRenderer.expandHunk(
+        hunkIndex,
+        direction,
+        expansionLineCountOverride
+      );
+      this.resetLayoutCache({ includeEstimatedHeights: true });
       this.computeApproximateSize();
     }
+    this.loadFilesIfNecessary();
+    this.forceRenderOverride = true;
     this.virtualizer.instanceChanged(this, true);
   };
+
+  protected override async handleFilesLoaded(
+    expectedDiff: FileDiffMetadata,
+    files: LoadedPartialDiffContents
+  ): Promise<void> {
+    if (this.fileDiff !== expectedDiff || !expectedDiff.isPartial) {
+      return;
+    }
+    // CodeView component requires careful control for anchor
+    // fixing on re-renders, and thus we cannot apply the
+    // next diff immediately. Instead we clone and stage it for
+    // CodeView layout to consume at render time.
+    if (this.isAdvancedMode()) {
+      const nextDiff = hydratePartialDiff('clone', expectedDiff, files);
+      await awaitWithTimeout(() => this.primeHighlightCache(nextDiff));
+      if (!this.enabled || this.fileDiff !== expectedDiff) {
+        return;
+      }
+      this.pendingHydratedDiff = {
+        expectedDiff,
+        nextDiff,
+        files,
+      };
+    } else {
+      hydratePartialDiff('merge', expectedDiff, files);
+      this.setHydratedState(files);
+      await awaitWithTimeout(() => this.primeHighlightCache(expectedDiff));
+      if (!this.enabled || this.fileDiff !== expectedDiff) {
+        return;
+      }
+      this.resetLayoutCache({ includeEstimatedHeights: true });
+      this.computeApproximateSize();
+    }
+    this.forceRenderOverride = true;
+    this.virtualizer.instanceChanged(this, true);
+  }
+
+  public consumeCodeViewLayoutChanges(
+    expectedFileDiff: FileDiffMetadata
+  ): FileDiffMetadata | undefined {
+    let hasLayoutChange = false;
+    let nextDiff: FileDiffMetadata | undefined;
+    const { pendingExpansions, pendingHydratedDiff } = this;
+
+    if (pendingExpansions != null) {
+      this.pendingExpansions = undefined;
+      for (const pendingExpansion of pendingExpansions) {
+        this.hunksRenderer.expandHunk(
+          pendingExpansion.hunkIndex,
+          pendingExpansion.direction,
+          pendingExpansion.expansionLineCountOverride
+        );
+        hasLayoutChange = true;
+      }
+    }
+
+    if (pendingHydratedDiff != null) {
+      this.pendingHydratedDiff = undefined;
+      if (pendingHydratedDiff.expectedDiff === expectedFileDiff) {
+        this.setHydratedState(pendingHydratedDiff.files);
+        nextDiff = pendingHydratedDiff.nextDiff;
+      }
+    }
+
+    if (nextDiff != null) {
+      this.forceRenderOverride = true;
+      this.resetLayoutCache({ includeEstimatedHeights: true });
+    } else if (hasLayoutChange) {
+      this.forceRenderOverride = true;
+      this.invalidateDerivedLayoutCache(true);
+    }
+
+    return nextDiff;
+  }
+
+  protected override loadFilesIfNecessary(): void {
+    if (this.pendingHydratedDiff != null) {
+      if (this.pendingHydratedDiff.expectedDiff === this.fileDiff) {
+        return;
+      }
+      this.pendingHydratedDiff = undefined;
+    }
+
+    super.loadFilesIfNecessary();
+  }
+
+  // In advanced (CodeView) mode, expansions are staged in pendingExpansions
+  // until the next layout consume, so the renderer's expansion map lags a
+  // just-requested reveal. Account for the staged expansions so callers (the
+  // editor's caret-scroll retry) see the post-consume visibility.
+  override isLineRenderable(lineNumber: number): boolean {
+    if (super.isLineRenderable(lineNumber)) {
+      return true;
+    }
+    const { pendingExpansions } = this;
+    const fileDiff = this.fileDiffCache;
+    if (
+      pendingExpansions == null ||
+      pendingExpansions.length === 0 ||
+      fileDiff == null
+    ) {
+      return false;
+    }
+    const {
+      expansionLineCount = 100,
+      collapsedContextThreshold = DEFAULT_COLLAPSED_CONTEXT_THRESHOLD,
+    } = this.options;
+    const staged = new Map(this.hunksRenderer.getExpandedHunksMap());
+    for (const expansion of pendingExpansions) {
+      const region = {
+        ...(staged.get(expansion.hunkIndex) ?? { fromStart: 0, fromEnd: 0 }),
+      };
+      const count = expansion.expansionLineCountOverride ?? expansionLineCount;
+      if (expansion.direction === 'up' || expansion.direction === 'both') {
+        region.fromStart += count;
+      }
+      if (expansion.direction === 'down' || expansion.direction === 'both') {
+        region.fromEnd += count;
+      }
+      staged.set(expansion.hunkIndex, region);
+    }
+    return isAdditionLineRenderable({
+      fileDiff,
+      lineNumber,
+      expandedHunks: staged,
+      collapsedContextThreshold,
+    });
+  }
+
+  /**
+   * Invalidate layout after an edit session changed the rendered row set
+   * without a line-count change (a mid-session region change or the exit
+   * recompute): estimated heights bake the hunk shapes in, and nothing else
+   * invalidates them now that editing does not flip expandUnchanged. Public
+   * so CodeView can run it when reaping a session whose instance was already
+   * released.
+   */
+  public invalidateEditSessionLayout(): void {
+    this.getSimpleVirtualizer()?.markDOMDirty();
+    this.resetLayoutCache({
+      forceSimpleRecompute: this.isSimpleMode(),
+      includeEstimatedHeights: true,
+      resetRenderRange: false,
+    });
+    if (!this.isSimpleMode()) {
+      this.computeApproximateSize(true);
+    }
+    this.getSimpleVirtualizer()?.requestHeightReconcile(this);
+  }
+
+  // Session region changes need the same invalidation a document change
+  // gets. The virtualizer is told the layout changed (rendered rows and
+  // heights moved) and defers the actual render through its own queue; a
+  // released instance stops at the cache invalidation and the host relayout
+  // covers it.
+  protected override escalateEditSessionRender(): void {
+    this.invalidateEditSessionLayout();
+    if (!this.enabled || this.fileDiff == null) {
+      return;
+    }
+    this.forceRenderOverride = true;
+    this.virtualizer.instanceChanged(this, true);
+  }
+
+  protected override shouldSelfHealEditSession(): boolean {
+    // CodeView sessions survive recycling with no editor attached; CodeView
+    // itself runs the exit recompute when it reaps a session.
+    return !this.isAdvancedMode() && super.shouldSelfHealEditSession();
+  }
 
   public setVisibility(visible: boolean): void {
     if (this.isAdvancedMode() || this.fileContainer == null) {
@@ -769,12 +1017,55 @@ export class VirtualizedFileDiff<
     this.virtualizer.instanceChanged(this, false);
   }
 
+  // Normally triggered by the host when the document line count changes.
+  override applyDocumentChange(
+    textDocument: DiffsTextDocument,
+    newLineAnnotations?: DiffLineAnnotation<LAnnotation>[],
+    shouldUpdateBuffer = false
+  ): void {
+    const previousRenderRange = this.renderRange;
+
+    super.applyDocumentChange(textDocument, newLineAnnotations);
+
+    this.getSimpleVirtualizer()?.markDOMDirty();
+    this.resetLayoutCache({
+      forceSimpleRecompute: this.isSimpleMode(),
+      includeEstimatedHeights: true,
+      resetRenderRange: false,
+    });
+    if (!this.isSimpleMode()) {
+      this.computeApproximateSize(true);
+    }
+
+    // Recompute the buffer spacer when the edit grew the document below the
+    // rendered window so scroll/caret positioning stays correct before the next
+    // virtualizer re-sync.
+    if (
+      shouldUpdateBuffer &&
+      previousRenderRange !== undefined &&
+      this.fileDiff !== undefined
+    ) {
+      const windowSpecs = this.virtualizer.getWindowSpecs();
+      const renderRange = this.computeRenderRangeFromWindow(
+        this.fileDiff,
+        this.top ?? 0,
+        windowSpecs
+      );
+      if (renderRange.bufferAfter !== previousRenderRange.bufferAfter) {
+        this.updateBuffers(renderRange);
+      }
+    }
+  }
+
   // Compute the approximate size from the cached baseline estimate plus any
   // measured height deltas observed in rendered rows.
   // The reason we refer to this as `approximate size` is because heights my
   // dynamically change for a number of reasons so we can never be fully sure
   // if the height is 100% accurate
-  private computeApproximateSize(force = false): void {
+  private computeApproximateSize(
+    force = false,
+    fileDiff: FileDiffMetadata | undefined = this.fileDiff
+  ): void {
     const shouldValidateSize = this.isResizeDebuggingEnabled();
     if (!force && !this.layoutDirty && !shouldValidateSize) {
       return;
@@ -784,7 +1075,7 @@ export class VirtualizedFileDiff<
     this.height = 0;
     this.cache.checkpoints = [];
     this.cache.totalLines = 0;
-    if (this.fileDiff == null) {
+    if (fileDiff == null) {
       this.layoutDirty = false;
       return;
     }
@@ -802,16 +1093,19 @@ export class VirtualizedFileDiff<
     }
 
     this.height =
-      this.getActiveEstimatedHeight() + this.cache.measuredHeightDeltaTotal;
+      this.getActiveEstimatedHeight(fileDiff) +
+      this.cache.measuredHeightDeltaTotal;
 
     if (shouldValidateSize && !isFirstCompute) {
-      this.validateComputedHeight();
+      this.validateComputedHeight(fileDiff);
     }
     this.layoutDirty = false;
   }
 
-  private getActiveEstimatedHeight(): number {
-    this.ensureEstimatedDiffHeights();
+  private getActiveEstimatedHeight(
+    fileDiff: FileDiffMetadata | undefined = this.fileDiff
+  ): number {
+    this.ensureEstimatedDiffHeights(fileDiff);
     const estimatedHeight =
       this.getDiffStyle() === 'split'
         ? this.cache.estimatedSplitHeight
@@ -824,8 +1118,10 @@ export class VirtualizedFileDiff<
     return estimatedHeight;
   }
 
-  private ensureEstimatedDiffHeights(): void {
-    if (this.fileDiff == null) {
+  private ensureEstimatedDiffHeights(
+    fileDiff: FileDiffMetadata | undefined = this.fileDiff
+  ): void {
+    if (fileDiff == null) {
       this.cache.estimatedSplitHeight = undefined;
       this.cache.estimatedUnifiedHeight = undefined;
       return;
@@ -843,20 +1139,26 @@ export class VirtualizedFileDiff<
       collapsedContextThreshold = DEFAULT_COLLAPSED_CONTEXT_THRESHOLD,
     } = this.options;
     const { splitHeight, unifiedHeight } = computeEstimatedDiffHeights({
-      fileDiff: this.fileDiff,
+      fileDiff,
       metrics: this.metrics,
       disableFileHeader,
       hunkSeparators: this.getHunkSeparatorType(),
       expandUnchanged,
       expandedHunks: this.hunksRenderer.getExpandedHunksMap(),
       collapsedContextThreshold,
+      canHydratePartialDiff: canHydrateCollapsedContext(
+        fileDiff,
+        this.options.loadDiffFiles != null
+      ),
     });
     this.cache.estimatedSplitHeight = splitHeight;
     this.cache.estimatedUnifiedHeight = unifiedHeight;
   }
 
-  private validateComputedHeight(): void {
-    if (this.fileContainer == null || this.fileDiff == null) {
+  private validateComputedHeight(
+    fileDiff: FileDiffMetadata | undefined = this.fileDiff
+  ): void {
+    if (this.fileContainer == null || fileDiff == null) {
       return;
     }
 
@@ -865,7 +1167,7 @@ export class VirtualizedFileDiff<
       console.log(
         'VirtualizedFileDiff.computeApproximateSize: computed height doesnt match',
         {
-          name: this.fileDiff.name,
+          name: fileDiff.name,
           elementHeight: rect.height,
           computedHeight: this.height,
         }
@@ -879,33 +1181,51 @@ export class VirtualizedFileDiff<
 
   override render({
     fileContainer,
-    oldFile,
-    newFile,
     fileDiff,
     forceRender = false,
     lineAnnotations,
-    ...props
+    ...fileInputProps
   }: FileDiffRenderProps<LAnnotation> = {}): boolean {
+    const fileInput = getDiffFileInput(
+      fileInputProps,
+      'VirtualizedFileDiff.render'
+    );
+    const hasFileInput = fileInput != null;
+    const oldFile = fileInput?.oldFile;
+    const newFile = fileInput?.newFile;
+    const filesDidChange =
+      hasFileInput &&
+      (!areOptionalFilesEqual(oldFile, this.deletionFile) ||
+        !areOptionalFilesEqual(newFile, this.additionFile));
+    let nextFileDiff = fileDiff ?? this.fileDiff;
+    if (
+      fileDiff == null &&
+      hasFileInput &&
+      (filesDidChange || this.fileDiff == null)
+    ) {
+      nextFileDiff = parseDiffFromFile(
+        fileInput.oldFile,
+        fileInput.newFile,
+        this.options.parseDiffOptions
+      );
+    }
     const { forceRenderOverride, isSetup } = this;
     this.forceRenderOverride = undefined;
     const annotationsChanged = this.syncLineAnnotations(lineAnnotations);
     if (annotationsChanged) {
       this.resetLayoutCache({ includeEstimatedHeights: false });
     }
-
-    this.fileDiff ??=
-      fileDiff ??
-      (oldFile != null && newFile != null
-        ? // NOTE(amadeus): We might be forcing ourselves to double up the
-          // computation of fileDiff (in the super.render() call), so we might want
-          // to figure out a way to avoid that.  That also could be just as simple as
-          // passing through fileDiff though... so maybe we good?
-          parseDiffFromFile(oldFile, newFile, this.options.parseDiffOptions)
-        : undefined);
+    const diffInputChanged = fileDiff != null && fileDiff !== this.fileDiff;
+    const targetChanged =
+      nextFileDiff != null && !areDiffTargetsEqual(this.fileDiff, nextFileDiff);
+    const dataChanged = diffInputChanged || filesDidChange;
+    if (targetChanged) {
+      this.resetLayoutCache({ includeEstimatedHeights: true });
+    }
 
     fileContainer = this.getOrCreateFileContainer(fileContainer);
 
-    if (this.fileDiff == null) {
+    if (nextFileDiff == null) {
       console.error(
         'VirtualizedFileDiff.render: attempting to virtually render when we dont have the correct data'
       );
@@ -913,7 +1233,7 @@ export class VirtualizedFileDiff<
     }
 
     if (!isSetup) {
-      this.computeApproximateSize();
+      this.computeApproximateSize(false, nextFileDiff);
       const virtualizer = this.getSimpleVirtualizer();
       this.top ??= this.getVirtualizedTop();
       if (this.isAdvancedMode()) {
@@ -933,29 +1253,51 @@ export class VirtualizedFileDiff<
       this.isSetup = true;
     } else {
       this.top ??= this.getVirtualizedTop();
+      if (targetChanged) {
+        this.computeApproximateSize(false, nextFileDiff);
+      }
     }
 
-    if (!this.isVisible && this.isSimpleMode()) {
+    if (!this.isVisible && this.isSimpleMode() && (!dataChanged || !isSetup)) {
+      this.fileDiff = nextFileDiff;
+      if (fileInput != null) {
+        this.deletionFile = oldFile;
+        this.additionFile = newFile;
+      }
+      if (targetChanged) {
+        this.cachedHeaderHTML = undefined;
+      }
       return this.renderPlaceholder(this.height);
     }
 
     const windowSpecs = this.virtualizer.getWindowSpecs();
     const fileTop = this.top ?? 0;
     const renderRange = this.computeRenderRangeFromWindow(
-      this.fileDiff,
+      nextFileDiff,
       fileTop,
       windowSpecs
     );
-    return super.render({
-      fileDiff: this.fileDiff,
+    const rendered = super.render({
+      fileDiff: nextFileDiff,
       fileContainer,
       renderRange,
-      oldFile,
-      newFile,
       lineAnnotations,
-      forceRender: (forceRenderOverride ?? forceRender) || annotationsChanged,
-      ...props,
+      forceRender:
+        (forceRenderOverride ?? forceRender) ||
+        annotationsChanged ||
+        targetChanged,
+      ...fileInput,
+      ...fileInputProps,
     });
+    // Renders can be driven from outside the virtualizer (host/React render
+    // calls, async highlight completions), and the virtualizer only
+    // auto-reconciles renders it initiated. Queue a measured-height
+    // reconciliation for every applied content render so line deltas
+    // (wrapped lines, annotation heights) survive layout resets.
+    if (this.isSimpleMode() && rendered) {
+      this.getSimpleVirtualizer()?.requestHeightReconcile(this);
+    }
+    return rendered;
   }
 
   public syncVirtualizedTop(): void {
@@ -999,11 +1341,13 @@ export class VirtualizedFileDiff<
     return getOptionHunkSeparatorType(this.options.hunkSeparators);
   }
 
-  private approximateLayoutCheckpoints(): void {
+  private approximateLayoutCheckpoints(
+    fileDiff: FileDiffMetadata | undefined = this.fileDiff
+  ): void {
     if (
-      this.cache.checkpoints.length > 0 ||
-      this.fileDiff == null ||
-      this.fileDiff.hunks.length === 0 ||
+      (!this.layoutDirty && this.cache.checkpoints.length > 0) ||
+      fileDiff == null ||
+      fileDiff.hunks.length === 0 ||
       this.options.collapsed === true
     ) {
       return;
@@ -1014,7 +1358,11 @@ export class VirtualizedFileDiff<
       expandUnchanged = false,
       collapsedContextThreshold = DEFAULT_COLLAPSED_CONTEXT_THRESHOLD,
     } = this.options;
-    const finalHunkIndex = this.fileDiff.hunks.length - 1;
+    const finalHunkIndex = fileDiff.hunks.length - 1;
+    const canHydratePartialDiff = canHydrateCollapsedContext(
+      fileDiff,
+      this.options.loadDiffFiles != null
+    );
     const diffStyle = this.getDiffStyle();
     const hunkSeparators = this.getHunkSeparatorType();
     const expandedHunks = expandUnchanged
@@ -1064,7 +1412,7 @@ export class VirtualizedFileDiff<
           lineIndex: startLineIndex + offset,
           top: checkpointTop,
         });
-        nextCheckpoint += LAYOUT_CHECKPOINT_INTERVAL;
+        nextCheckpoint += VIRTUALIZED_FILE_DIFF_LAYOUT_CHECKPOINT_INTERVAL;
       }
 
       top +=
@@ -1080,12 +1428,8 @@ export class VirtualizedFileDiff<
       renderedLineIndex = blockEnd;
     };
 
-    for (
-      let hunkIndex = 0;
-      hunkIndex < this.fileDiff.hunks.length;
-      hunkIndex++
-    ) {
-      const hunk = this.fileDiff.hunks[hunkIndex];
+    for (let hunkIndex = 0; hunkIndex < fileDiff.hunks.length; hunkIndex++) {
+      const hunk = fileDiff.hunks[hunkIndex];
       if (hunk == null) {
         throw new Error(
           'VirtualizedFileDiff.approximateLayoutCheckpoints: invalid hunk index'
@@ -1093,7 +1437,7 @@ export class VirtualizedFileDiff<
       }
 
       const leadingRegion = getExpandedRegion({
-        isPartial: this.fileDiff.isPartial,
+        isPartial: fileDiff.isPartial,
         rangeSize: hunk.collapsedBefore,
         expandedHunks,
         hunkIndex,
@@ -1133,7 +1477,7 @@ export class VirtualizedFileDiff<
       const trailingRegion =
         hunkIndex === finalHunkIndex
           ? getTrailingExpandedRegion({
-              fileDiff: this.fileDiff,
+              fileDiff,
               hunkIndex,
               expandedHunks,
               collapsedContextThreshold,
@@ -1146,7 +1490,12 @@ export class VirtualizedFileDiff<
               type: hunkSeparators,
               metrics: this.metrics,
             })?.totalHeight ?? 0)
-          : 0;
+          : hunkIndex === finalHunkIndex && canHydratePartialDiff
+            ? (getTrailingHunkSeparatorLayout({
+                type: hunkSeparators,
+                metrics: this.metrics,
+              })?.totalHeight ?? 0)
+            : 0;
       const trailingExpandedCount =
         trailingRegion != null
           ? trailingRegion.fromStart + trailingRegion.fromEnd
@@ -1310,6 +1659,27 @@ export class VirtualizedFileDiff<
     return count;
   }
 
+  // Row total used to clamp render-range scrolling. Sparse layout checkpoints can
+  // still hold a smaller pre-edit count until they are rebuilt, so always take
+  // the max against the live diff metadata (including additionLines.length).
+  private getLayoutLineCount(
+    fileDiff: FileDiffMetadata,
+    diffStyle: 'split' | 'unified'
+  ): number {
+    const expandedLineCount = this.getExpandedLineCount(fileDiff, diffStyle);
+    const metadataLineCount =
+      diffStyle === 'split'
+        ? fileDiff.splitLineCount
+        : fileDiff.unifiedLineCount;
+    return Math.max(
+      expandedLineCount,
+      metadataLineCount,
+      fileDiff.additionLines.length,
+      fileDiff.deletionLines.length,
+      this.cache.totalLines
+    );
+  }
+
   private computeRenderRangeFromWindow(
     fileDiff: FileDiffMetadata,
     fileTop: number,
@@ -1323,11 +1693,12 @@ export class VirtualizedFileDiff<
     const { hunkLineCount, lineHeight } = this.metrics;
     const diffStyle = this.getDiffStyle();
     const hunkSeparators = this.getHunkSeparatorType();
+    const canHydratePartialDiff = canHydrateCollapsedContext(
+      fileDiff,
+      this.options.loadDiffFiles != null
+    );
     const fileHeight = this.height;
-    let lineCount =
-      this.cache.totalLines > 0
-        ? this.cache.totalLines
-        : this.getExpandedLineCount(fileDiff, diffStyle);
+    let lineCount = this.getLayoutLineCount(fileDiff, diffStyle);
 
     const headerRegion = getVirtualFileHeaderRegion(
       this.metrics,
@@ -1369,8 +1740,8 @@ export class VirtualizedFileDiff<
       };
     }
 
-    this.approximateLayoutCheckpoints();
-    lineCount = this.cache.totalLines > 0 ? this.cache.totalLines : lineCount;
+    this.approximateLayoutCheckpoints(fileDiff);
+    lineCount = this.getLayoutLineCount(fileDiff, diffStyle);
 
     const estimatedTargetLines = Math.ceil(
       Math.max(bottom - top, 0) / lineHeight
@@ -1423,6 +1794,13 @@ export class VirtualizedFileDiff<
             : deletionLine.unifiedLineIndex;
         const hasMetadata =
           (additionLine?.noEOFCR ?? false) || (deletionLine?.noEOFCR ?? false);
+        const isFinalHunkRow =
+          hunkIndex === fileDiff.hunks.length - 1 &&
+          hunk != null &&
+          (diffStyle === 'split'
+            ? splitLineIndex === hunk.splitLineStart + hunk.splitLineCount - 1
+            : unifiedLineIndex ===
+              hunk.unifiedLineStart + hunk.unifiedLineCount - 1);
         const leadingSeparator =
           collapsedBefore > 0
             ? getLeadingHunkSeparatorLayout({
@@ -1485,12 +1863,26 @@ export class VirtualizedFileDiff<
         currentLine++;
         absoluteLineTop += lineHeight;
 
-        if (collapsedAfter > 0) {
-          absoluteLineTop +=
-            getTrailingHunkSeparatorLayout({
-              type: hunkSeparators,
-              metrics: this.metrics,
-            })?.totalHeight ?? 0;
+        if (collapsedAfter > 0 || (isFinalHunkRow && canHydratePartialDiff)) {
+          const trailingSeparator = getTrailingHunkSeparatorLayout({
+            type: hunkSeparators,
+            metrics: this.metrics,
+          });
+          if (trailingSeparator != null) {
+            if (
+              absoluteLineTop < bottom &&
+              absoluteLineTop + trailingSeparator.totalHeight > top
+            ) {
+              firstVisibleHunk ??= currentHunk;
+            }
+            if (
+              centerHunk == null &&
+              absoluteLineTop + trailingSeparator.totalHeight > viewportCenter
+            ) {
+              centerHunk = currentHunk;
+            }
+            absoluteLineTop += trailingSeparator.totalHeight;
+          }
         }
 
         return false;
@@ -1625,8 +2017,9 @@ function lowerBound(values: number[], target: number): number {
 
 function getNextCheckpointIndex(renderedLineIndex: number): number {
   return (
-    Math.ceil(renderedLineIndex / LAYOUT_CHECKPOINT_INTERVAL) *
-    LAYOUT_CHECKPOINT_INTERVAL
+    Math.ceil(
+      renderedLineIndex / VIRTUALIZED_FILE_DIFF_LAYOUT_CHECKPOINT_INTERVAL
+    ) * VIRTUALIZED_FILE_DIFF_LAYOUT_CHECKPOINT_INTERVAL
   );
 }
 
@@ -1702,6 +2095,8 @@ function hasDiffLayoutOptionChanged<LAnnotation>(
       (nextOptions.diffIndicators ?? 'bars') ||
     (previousOptions.hunkSeparators ?? 'line-info') !==
       (nextOptions.hunkSeparators ?? 'line-info') ||
+    Boolean(previousOptions.loadDiffFiles) !==
+      Boolean(nextOptions.loadDiffFiles) ||
     (previousOptions.expandUnchanged ?? false) !==
       (nextOptions.expandUnchanged ?? false) ||
     (previousOptions.collapsedContextThreshold ??
@@ -1721,6 +2116,8 @@ function hasDiffEstimateOptionChanged<LAnnotation>(
       (nextOptions.disableFileHeader ?? false) ||
     (previousOptions.hunkSeparators ?? 'line-info') !==
       (nextOptions.hunkSeparators ?? 'line-info') ||
+    Boolean(previousOptions.loadDiffFiles) !==
+      Boolean(nextOptions.loadDiffFiles) ||
     (previousOptions.expandUnchanged ?? false) !==
       (nextOptions.expandUnchanged ?? false) ||
     (previousOptions.collapsedContextThreshold ??
@@ -1730,12 +2127,33 @@ function hasDiffEstimateOptionChanged<LAnnotation>(
   );
 }
 
+function canHydrateCollapsedContext(
+  fileDiff: FileDiffMetadata,
+  hasFileLoader: boolean
+): boolean {
+  return (
+    fileDiff.isPartial &&
+    hasFileLoader &&
+    (fileDiff.type === 'change' || fileDiff.type === 'rename-changed')
+  );
+}
+
 function getOptionHunkSeparatorType<LAnnotation>(
   hunkSeparators: FileDiffOptions<LAnnotation>['hunkSeparators'] | undefined
 ): HunkSeparators {
   return typeof hunkSeparators === 'function'
     ? 'custom'
     : (hunkSeparators ?? 'line-info');
+}
+
+function areOptionalFilesEqual(
+  fileA: FileContents | null | undefined,
+  fileB: FileContents | null | undefined
+): boolean {
+  if (fileA == null || fileB == null) {
+    return fileA == null && fileB == null;
+  }
+  return areFilesEqual(fileA, fileB);
 }
 
 // Extracts the view-specific line index from the data-line-index attribute.

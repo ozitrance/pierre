@@ -1,4 +1,7 @@
-import { queueRender } from '../managers/UniversalRenderingManager';
+import {
+  dequeueRender,
+  queueRender,
+} from '../managers/UniversalRenderingManager';
 import type { VirtualWindowSpecs } from '../types';
 import { areVirtualWindowSpecsEqual } from '../utils/areVirtualWindowSpecsEqual';
 import { createWindowFromScrollPosition } from '../utils/createWindowFromScrollPosition';
@@ -62,6 +65,11 @@ export class Virtualizer {
   private visibleInstances: Map<HTMLElement, SubscribedInstance> = new Map();
   private visibleInstancesDirty: boolean = false;
   private instancesChanged: Set<SubscribedInstance> = new Set();
+  // Instances whose content was (re)painted outside a virtualizer-driven
+  // onRender — host/React render calls, async highlight completions — and
+  // still need a measured-height reconciliation pass. See
+  // requestHeightReconcile.
+  private reconcileQueue: Set<SubscribedInstance> = new Set();
 
   private scrollDirty = true;
   private heightDirty = true;
@@ -124,6 +132,18 @@ export class Virtualizer {
     queueRender(this.computeRenderRangeAndEmit);
   }
 
+  // The render loop only reconciles heights for instances it repainted
+  // itself, but content can also land outside a virtualizer pass (a
+  // host/React-driven render call, an async highlight completion). Those
+  // renders queue themselves here so their measured line deltas — wrapped
+  // lines, annotation heights — are re-captured; otherwise a layout reset
+  // (e.g. an edit-session exit recompute) leaves the instance stuck on its
+  // baseline estimate and its placeholder renders the wrong height.
+  requestHeightReconcile(instance: SubscribedInstance): void {
+    this.reconcileQueue.add(instance);
+    queueRender(this.computeRenderRangeAndEmit);
+  }
+
   getWindowSpecs(): VirtualWindowSpecs {
     if (this.windowSpecs.top === 0 && this.windowSpecs.bottom === 0) {
       this.windowSpecs = createWindowFromScrollPosition({
@@ -134,6 +154,10 @@ export class Virtualizer {
       });
     }
     return this.windowSpecs;
+  }
+
+  getRoot(): HTMLElement | Document | undefined {
+    return this.root;
   }
 
   isInstanceVisible(elementTop: number, elementHeight: number): boolean {
@@ -216,6 +240,7 @@ export class Virtualizer {
   }
 
   cleanUp(): void {
+    dequeueRender(this.computeRenderRangeAndEmit);
     this.resizeObserver?.disconnect();
     this.resizeObserver = undefined;
     this.intersectionObserver?.disconnect();
@@ -228,6 +253,7 @@ export class Virtualizer {
     this.observers.clear();
     this.visibleInstances.clear();
     this.instancesChanged.clear();
+    this.reconcileQueue.clear();
     this.connectQueue.clear();
     this.visibleInstancesDirty = false;
     this.windowSpecs = { top: 0, bottom: 0 };
@@ -270,6 +296,8 @@ export class Virtualizer {
     }
     this.intersectionObserver?.unobserve(container);
     this.observers.delete(container);
+    this.instancesChanged.delete(instance);
+    this.reconcileQueue.delete(instance);
     if (this.visibleInstances.delete(container)) {
       this.visibleInstancesDirty = true;
     }
@@ -320,7 +348,8 @@ export class Virtualizer {
       !this.heightDirty &&
       this.renderedObservers === this.observers.size &&
       !this.visibleInstancesDirty &&
-      this.instancesChanged.size === 0
+      this.instancesChanged.size === 0 &&
+      this.reconcileQueue.size === 0
     ) {
       // NOTE(amadeus): Is this a safe assumption/optimization?
       return;
@@ -341,7 +370,8 @@ export class Virtualizer {
         !wrapperDirty &&
         areVirtualWindowSpecsEqual(this.windowSpecs, windowSpecs) &&
         this.renderedObservers === this.observers.size &&
-        !this.visibleInstancesDirty
+        !this.visibleInstancesDirty &&
+        this.reconcileQueue.size === 0
       ) {
         return;
       }
@@ -370,8 +400,16 @@ export class Virtualizer {
     this.scrollFix(anchor);
 
     for (const instance of updatedInstances) {
+      this.reconcileQueue.delete(instance);
       instance.reconcileHeights();
     }
+    // Reconcile externally-rendered instances that may have new heights
+    for (const instance of this.reconcileQueue) {
+      if (instance.reconcileHeights()) {
+        instancesHaveChanged = true;
+      }
+    }
+    this.reconcileQueue.clear();
     instancesHaveChanged ||= this.instancesChanged.size > 0;
 
     // Reconciliation reads virtualized offsets and can consume dirty geometry
@@ -641,7 +679,7 @@ export class Virtualizer {
     return this.height;
   }
 
-  private markDOMDirty() {
+  markDOMDirty(): void {
     this.scrollDirty = true;
     this.scrollHeightDirty = true;
     this.heightDirty = true;

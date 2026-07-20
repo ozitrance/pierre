@@ -9,6 +9,8 @@ import type { Metadata } from 'next';
 import { MERGE_CONFLICT_EXAMPLE } from '../_examples/MergeConflict/constants';
 import { MergeConflict } from '../_examples/MergeConflict/MergeConflict';
 import {
+  CODE_VIEW_HEADER_FOOTER_REACT_EXAMPLE,
+  CODE_VIEW_HEADER_FOOTER_VANILLA_EXAMPLE,
   CODE_VIEW_ITEM_METRICS_OPTIONS_EXAMPLE,
   CODE_VIEW_ITEM_TYPE_EXAMPLE,
   CODE_VIEW_LAYOUT_OPTIONS_EXAMPLE,
@@ -27,6 +29,26 @@ import {
   CUSTOM_HUNK_SEPARATORS_SWITCHER,
 } from '../docs/CustomHunkSeparators/constants';
 import {
+  EDITOR_DEMO_FILE_EXAMPLE,
+  EDITOR_LAZY_FILE_EXAMPLE,
+  EDITOR_MARKER_EXAMPLE,
+  EDITOR_MARKER_TYPE,
+  EDITOR_OPTIONS_TYPE,
+  EDITOR_PUBLIC_API,
+  EDITOR_REACT_CODE_VIEW_EXAMPLE,
+  EDITOR_REACT_EXAMPLE,
+  EDITOR_REACT_FILE_DIFF_EXAMPLE,
+  EDITOR_REACT_MULTI_FILE_DIFF_EXAMPLE,
+  EDITOR_SELECTION_ACTION_CONTEXT_TYPE,
+  EDITOR_SELECTION_ACTION_EXAMPLE,
+  EDITOR_UNDO_REDO_EXAMPLE,
+  EDITOR_VANILLA_CODE_VIEW_EXAMPLE,
+  EDITOR_VANILLA_FILE_DIFF_EXAMPLE,
+  EDITOR_VANILLA_FILE_EXAMPLE,
+  EDITOR_WORKER_POOL_REACT_EXAMPLE,
+  EDITOR_WORKER_POOL_VANILLA_EXAMPLE,
+} from '../docs/Editor/constants';
+import {
   INSTALLATION_EXAMPLES,
   PACKAGE_MANAGERS,
 } from '../docs/Installation/constants';
@@ -41,6 +63,7 @@ import {
   REACT_API_CODE_VIEW,
   REACT_API_FILE,
   REACT_API_FILE_DIFF,
+  REACT_API_LOAD_DIFF_FILES,
   REACT_API_MULTI_FILE_DIFF,
   REACT_API_PATCH_DIFF,
   REACT_API_POST_RENDER_LIFECYCLE,
@@ -93,6 +116,7 @@ import {
   VANILLA_API_FILE_RENDERER,
   VANILLA_API_HUNKS_RENDERER_FILE,
   VANILLA_API_HUNKS_RENDERER_PATCH_FILE,
+  VANILLA_API_LOAD_DIFF_FILES,
   VANILLA_API_POST_RENDER_LIFECYCLE,
   VANILLA_API_UNRESOLVED_FILE_EXAMPLE,
 } from '../docs/VanillaAPI/constants';
@@ -163,6 +187,7 @@ export default function DocsPage() {
           <ReactAPISection />
           <VanillaAPISection />
           <CodeViewSection />
+          <EditorSection />
           <VirtualizationSection />
           <CustomHunkSeparatorsSection />
           <UtilitiesSection />
@@ -268,6 +293,7 @@ async function ReactAPISection() {
     reactAPIFileDiff,
     reactAPIUnresolvedFile,
     postRenderLifecycleExample,
+    loadDiffFilesExample,
     sharedDiffOptions,
     sharedDiffRenderProps,
     sharedFileOptions,
@@ -280,6 +306,7 @@ async function ReactAPISection() {
     preloadFile(REACT_API_FILE_DIFF),
     preloadFile(REACT_API_UNRESOLVED_FILE),
     preloadFile(REACT_API_POST_RENDER_LIFECYCLE),
+    preloadFile(REACT_API_LOAD_DIFF_FILES),
     preloadFile(REACT_API_SHARED_DIFF_OPTIONS),
     preloadFile(REACT_API_SHARED_DIFF_RENDER_PROPS),
     preloadFile(REACT_API_SHARED_FILE_OPTIONS),
@@ -295,6 +322,7 @@ async function ReactAPISection() {
       reactAPIFile,
       reactAPIUnresolvedFile,
       postRenderLifecycleExample,
+      loadDiffFilesExample,
       sharedDiffOptions,
       sharedDiffRenderProps,
       sharedFileOptions,
@@ -312,6 +340,7 @@ async function VanillaAPISection() {
     fileDiffProps,
     fileProps,
     unresolvedFileExample,
+    loadDiffFilesExample,
     postRenderLifecycleExample,
     customHunk,
     diffHunksRenderer,
@@ -324,6 +353,7 @@ async function VanillaAPISection() {
     preloadFile(VANILLA_API_FILE_DIFF_PROPS),
     preloadFile(VANILLA_API_FILE_PROPS),
     preloadFile(VANILLA_API_UNRESOLVED_FILE_EXAMPLE),
+    preloadFile(VANILLA_API_LOAD_DIFF_FILES),
     preloadFile(VANILLA_API_POST_RENDER_LIFECYCLE),
     preloadFile(VANILLA_API_CUSTOM_HUNK_FILE),
     preloadFile(VANILLA_API_HUNKS_RENDERER_FILE),
@@ -339,6 +369,7 @@ async function VanillaAPISection() {
       fileDiffProps,
       fileProps,
       unresolvedFileExample,
+      loadDiffFilesExample,
       postRenderLifecycleExample,
       customHunk,
       diffHunksRenderer,
@@ -357,6 +388,8 @@ async function CodeViewSection() {
     codeViewReactExample,
     codeViewScrollTargetsExample,
     codeViewVanillaExample,
+    codeViewHeaderFooterReactExample,
+    codeViewHeaderFooterVanillaExample,
   ] = await Promise.all([
     preloadFile(CODE_VIEW_ITEM_TYPE_EXAMPLE),
     preloadFile(CODE_VIEW_LAYOUT_OPTIONS_EXAMPLE),
@@ -364,6 +397,8 @@ async function CodeViewSection() {
     preloadFile(CODE_VIEW_REACT_EXAMPLE),
     preloadFile(CODE_VIEW_SCROLL_TARGETS_EXAMPLE),
     preloadFile(CODE_VIEW_VANILLA_EXAMPLE),
+    preloadFile(CODE_VIEW_HEADER_FOOTER_REACT_EXAMPLE),
+    preloadFile(CODE_VIEW_HEADER_FOOTER_VANILLA_EXAMPLE),
   ]);
   const content = await renderMDX({
     filePath: '(diffs)/docs/CodeView/content.mdx',
@@ -374,6 +409,74 @@ async function CodeViewSection() {
       codeViewReactExample,
       codeViewScrollTargetsExample,
       codeViewVanillaExample,
+      codeViewHeaderFooterReactExample,
+      codeViewHeaderFooterVanillaExample,
+    },
+  });
+  return <ProseWrapper>{content}</ProseWrapper>;
+}
+
+async function EditorSection() {
+  const [
+    editorDemoFile,
+    editorVanillaFileExample,
+    editorVanillaFileDiffExample,
+    editorVanillaCodeViewExample,
+    editorLazyFileExample,
+    editorOptionsType,
+    editorPublicApi,
+    editorSelectionActionContextType,
+    editorSelectionActionExample,
+    editorMarkerType,
+    editorMarkerExample,
+    editorReactCodeViewExample,
+    editorReactExample,
+    editorReactFileDiffExample,
+    editorReactMultiFileDiffExample,
+    editorUndoRedoExample,
+    editorWorkerPoolReactExample,
+    editorWorkerPoolVanillaExample,
+  ] = await Promise.all([
+    preloadFile(EDITOR_DEMO_FILE_EXAMPLE),
+    preloadFile(EDITOR_VANILLA_FILE_EXAMPLE),
+    preloadFile(EDITOR_VANILLA_FILE_DIFF_EXAMPLE),
+    preloadFile(EDITOR_VANILLA_CODE_VIEW_EXAMPLE),
+    preloadFile(EDITOR_LAZY_FILE_EXAMPLE),
+    preloadFile(EDITOR_OPTIONS_TYPE),
+    preloadFile(EDITOR_PUBLIC_API),
+    preloadFile(EDITOR_SELECTION_ACTION_CONTEXT_TYPE),
+    preloadFile(EDITOR_SELECTION_ACTION_EXAMPLE),
+    preloadFile(EDITOR_MARKER_TYPE),
+    preloadFile(EDITOR_MARKER_EXAMPLE),
+    preloadFile(EDITOR_REACT_CODE_VIEW_EXAMPLE),
+    preloadFile(EDITOR_REACT_EXAMPLE),
+    preloadFile(EDITOR_REACT_FILE_DIFF_EXAMPLE),
+    preloadFile(EDITOR_REACT_MULTI_FILE_DIFF_EXAMPLE),
+    preloadFile(EDITOR_UNDO_REDO_EXAMPLE),
+    preloadFile(EDITOR_WORKER_POOL_REACT_EXAMPLE),
+    preloadFile(EDITOR_WORKER_POOL_VANILLA_EXAMPLE),
+  ]);
+  const content = await renderMDX({
+    filePath: '(diffs)/docs/Editor/content.mdx',
+    scope: {
+      editorDemoFile,
+      editorVanillaFileExample,
+      editorVanillaFileDiffExample,
+      editorVanillaCodeViewExample,
+      editorLazyFileExample,
+      editorOptionsType,
+      editorPublicApi,
+      editorSelectionActionContextType,
+      editorSelectionActionExample,
+      editorMarkerType,
+      editorMarkerExample,
+      editorReactCodeViewExample,
+      editorReactExample,
+      editorReactFileDiffExample,
+      editorReactMultiFileDiffExample,
+      editorUndoRedoExample,
+      editorWorkerPoolReactExample,
+      editorWorkerPoolVanillaExample,
     },
   });
   return <ProseWrapper>{content}</ProseWrapper>;

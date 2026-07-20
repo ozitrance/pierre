@@ -16,8 +16,10 @@ import { hasResolvedThemes } from '../highlighter/themes/hasResolvedThemes';
 import type {
   BaseCodeOptions,
   DiffsHighlighter,
+  DiffsTextDocument,
   FileContents,
   FileHeaderRenderMode,
+  HighlightedToken,
   LineAnnotation,
   RenderedFileASTCache,
   RenderFileOptions,
@@ -26,9 +28,11 @@ import type {
   SupportedLanguages,
   ThemedFileResult,
 } from '../types';
+import { applyLineTextWithNewline } from '../utils/applyLineTextWithNewline';
 import { areFileRenderOptionsEqual } from '../utils/areFileRenderOptionsEqual';
 import { areFilesEqual } from '../utils/areFilesEqual';
 import { areRenderRangesEqual } from '../utils/areRenderRangesEqual';
+import { linesFromFileContents } from '../utils/computeFileOffsets';
 import { createAnnotationElement } from '../utils/createAnnotationElement';
 import { createContentColumn } from '../utils/createContentColumn';
 import { createFileHeaderElement } from '../utils/createFileHeaderElement';
@@ -50,10 +54,8 @@ import {
   shouldRenderFileAnnotations,
 } from '../utils/includesFileAnnotations';
 import { isFilePlainText } from '../utils/isFilePlainText';
-import { iterateOverFile } from '../utils/iterateOverFile';
 import { renderFileWithHighlighter } from '../utils/renderFileWithHighlighter';
 import { shouldUseTokenTransformer } from '../utils/shouldUseTokenTransformer';
-import { splitFileContents } from '../utils/splitFileContents';
 import type { WorkerPoolManager } from '../worker';
 
 type AnnotationLineMap<LAnnotation> = Record<
@@ -82,7 +84,17 @@ export interface FileRenderResult {
 
 interface LineCache {
   cacheKey: string | undefined;
+  file: FileContents;
+  sourceContents: string;
   lines: string[];
+}
+
+// Explicit keys may share cached lines across equivalent file objects. Unkeyed
+// files stay isolated by object identity while still supporting edit recycle.
+function isLineCacheForFile(lineCache: LineCache, file: FileContents): boolean {
+  return file.cacheKey == null
+    ? lineCache.file === file && lineCache.sourceContents === file.contents
+    : lineCache.cacheKey === file.cacheKey;
 }
 
 export interface FileRendererOptions extends BaseCodeOptions {
@@ -99,6 +111,7 @@ export class FileRenderer<LAnnotation = undefined> {
   private computedLang: SupportedLanguages = 'text';
   private lineAnnotations: AnnotationLineMap<LAnnotation> = {};
   private lineCache: LineCache | undefined;
+  private textDocumentCache = new WeakMap<FileContents, DiffsTextDocument>();
 
   constructor(
     public options: FileRendererOptions = { theme: DEFAULT_THEMES },
@@ -142,10 +155,66 @@ export class FileRenderer<LAnnotation = undefined> {
     this.highlighter = undefined;
     this.workerManager?.cleanUpTasks(this);
     this.lineCache = undefined;
+    // The edited-document cache is only coherent alongside the render cache
+    // it patched. Keeping it across a recycle would let getLineCount report
+    // editor-session line counts (keyed by the long-lived file object) against
+    // a result rebuilt from the file's own contents, which processFileResult
+    // treats as a missing-line error.
+    this.textDocumentCache = new WeakMap();
+  }
+
+  // An edit session patches the render caches in place but never rewrites
+  // `file.contents`, so a recycled host would otherwise rebuild from the
+  // pre-edit text while the editor resumes its retained (edited) document.
+  // Diffs don't have this problem because DiffHunksRenderer keeps
+  // `diff.additionLines` in sync during the session; the file equivalent is
+  // joining the session-synced line cache back into the file object before
+  // the caches are dropped.
+  private syncEditedContentsToFile(): void {
+    const { renderCache, lineCache } = this;
+    if (
+      renderCache?.isDirty !== true ||
+      lineCache == null ||
+      !isLineCacheForFile(lineCache, renderCache.file)
+    ) {
+      return;
+    }
+    renderCache.file.contents = lineCache.lines.join('');
+  }
+
+  // Unkeyed files use object identity, so compare the retained source text to
+  // detect in-place mutations that an aliased file object cannot reveal.
+  public hasUnkeyedFileContentsChanged(file: FileContents): boolean {
+    const { lineCache } = this;
+    return (
+      file.cacheKey == null &&
+      lineCache != null &&
+      lineCache.file === file &&
+      lineCache.sourceContents !== file.contents
+    );
+  }
+
+  private invalidateChangedUnkeyedFile(file: FileContents): void {
+    if (!this.hasUnkeyedFileContentsChanged(file)) return;
+    this.workerManager?.cleanUpTasks(this);
+    this.clearRenderCache();
+    this.lineCache = undefined;
+    this.textDocumentCache = new WeakMap();
   }
 
   public clearRenderCache(): void {
+    this.syncEditedContentsToFile();
+    const renderCache = this.renderCache;
     this.renderCache = undefined;
+    if (
+      renderCache != null &&
+      renderCache.isDirty === true &&
+      renderCache.file.cacheKey != null
+    ) {
+      // The render cache has been updated by the host, let's purge it
+      // from the worker manager cache.
+      this.workerManager?.evictFileFromCache(renderCache.file.cacheKey);
+    }
   }
 
   public hydrate(file: FileContents): void {
@@ -207,22 +276,147 @@ export class FileRenderer<LAnnotation = undefined> {
   }
 
   public getOrCreateLineCache(file: FileContents): string[] {
-    // Uncached files will get split every time, not the greatest experience
-    // tbh... but something people should try to optimize away
-    if (file.cacheKey == null) {
-      this.lineCache = undefined;
-      return splitFileContents(file.contents);
-    }
-
+    this.invalidateChangedUnkeyedFile(file);
     let { lineCache } = this;
-    if (lineCache == null || lineCache.cacheKey !== file.cacheKey) {
+    if (lineCache == null || !isLineCacheForFile(lineCache, file)) {
       lineCache = {
         cacheKey: file.cacheKey,
-        lines: splitFileContents(file.contents),
+        file,
+        sourceContents: file.contents,
+        lines: linesFromFileContents(file.contents),
       };
     }
     this.lineCache = lineCache;
     return lineCache.lines;
+  }
+
+  // when a emitLineCountChange is called,
+  // calculate the line count using the cached text document
+  public getLineCount(file: FileContents): number {
+    const lines = this.getOrCreateLineCache(file);
+    return this.textDocumentCache.get(file)?.lineCount ?? lines.length;
+  }
+
+  public updateRenderCache(
+    dirtyLines: Map<number, Array<HighlightedToken>>,
+    themeType: 'dark' | 'light'
+  ): void {
+    if (this.renderCache == null) {
+      return;
+    }
+    const { file, result } = this.renderCache;
+    if (result == null) {
+      return;
+    }
+    // Mirror DiffHunksRenderer keeping `diff.additionLines` in sync during an
+    // edit session: patch the split-line cache with the edited line text so
+    // recycle() can persist the session's contents into the file. The line
+    // cache includes the document's trailing empty line, so editor line
+    // indexes map 1:1; lines past the cache (document grew) are handled by
+    // applyDocumentChange instead.
+    const lineCache =
+      this.lineCache != null && isLineCacheForFile(this.lineCache, file)
+        ? this.lineCache
+        : undefined;
+    for (const [line, tokens] of dirtyLines) {
+      if (lineCache != null && line < lineCache.lines.length) {
+        const lineText = tokens.map((token) => token[2]).join('');
+        lineCache.lines[line] = applyLineTextWithNewline(
+          lineCache.lines[line] ?? '',
+          lineText
+        );
+      }
+      result.code[line] = {
+        type: 'element',
+        tagName: 'div',
+        properties: {
+          'data-line': line + 1,
+          'data-line-type': 'context',
+          'data-line-index': line,
+        },
+        children: tokens.map(([char, fg, text]) => {
+          if (char === 0 && fg === '') {
+            if (text === '') {
+              return {
+                type: 'element',
+                tagName: 'br',
+                properties: {},
+                children: [],
+              };
+            }
+            return { type: 'text', value: text };
+          }
+          return {
+            type: 'element',
+            tagName: 'span',
+            properties: {
+              'data-char': char,
+              style: `color:${fg};`,
+            },
+            children: [{ type: 'text', value: text }],
+          };
+        }),
+      };
+    }
+
+    result.baseThemeType = themeType;
+    this.renderCache.isDirty = true;
+  }
+
+  // normally triggered by the host when the document line count changes
+  public applyDocumentChange(textDocument: DiffsTextDocument): void {
+    if (this.renderCache == null) {
+      return undefined;
+    }
+    const { file, result } = this.renderCache;
+    // Without a result there is nothing to reconcile the document against, so
+    // do not record it either: the document cache must never claim line
+    // counts the (possibly still highlighting) result cannot back, or the
+    // async highlight pass would process lines that do not exist.
+    if (result == null) {
+      return undefined;
+    }
+    if (result.code.length !== textDocument.lineCount) {
+      result.code.length = Math.min(result.code.length, textDocument.lineCount);
+      for (let i = result.code.length; i < textDocument.lineCount; i++) {
+        // prefill lines with plain text content
+        result.code.push({
+          type: 'element',
+          tagName: 'div',
+          properties: {
+            'data-line': i + 1,
+            'data-line-type': 'context',
+            'data-line-index': i,
+          },
+          children: [
+            {
+              type: 'element',
+              tagName: 'span',
+              properties: {
+                'data-char': 0,
+              },
+              children: [
+                {
+                  type: 'text',
+                  value: textDocument.getLineText(i),
+                },
+              ],
+            },
+          ],
+        });
+      }
+      this.renderCache.isDirty = true;
+    }
+    // A line-count change invalidates the per-line sync updateRenderCache
+    // performs, so rebuild the split-line cache from the document wholesale
+    // (the file analog of DiffHunksRenderer re-splitting `additionLines`).
+    this.lineCache = {
+      cacheKey: file.cacheKey,
+      file,
+      sourceContents: file.contents,
+      lines: linesFromFileContents(textDocument.getText()),
+    };
+    this.textDocumentCache.set(file, textDocument);
   }
 
   public renderFile(
@@ -231,6 +425,15 @@ export class FileRenderer<LAnnotation = undefined> {
   ): FileRenderResult | undefined {
     if (file == null) {
       return undefined;
+    }
+    this.invalidateChangedUnkeyedFile(file);
+    if (
+      this.renderCache?.isDirty === true &&
+      !areFilesEqual(file, this.renderCache.file)
+    ) {
+      this.clearRenderCache();
+      this.lineCache = undefined;
+      this.textDocumentCache = new WeakMap();
     }
     let { options, forceHighlight } = this.getRenderOptions(file);
     const cache = this.getMatchingWorkerResultCache(file, options);
@@ -404,10 +607,14 @@ export class FileRenderer<LAnnotation = undefined> {
     renderRange: RenderRange,
     { code, themeStyles, baseThemeType }: ThemedFileResult
   ): FileRenderResult {
+    const totalLines = this.getLineCount(file);
     const { disableFileHeader = false } = this.options;
     const contentArray: ElementContent[] = [];
     const gutter = createGutterWrapper();
-    const lines = this.getOrCreateLineCache(file);
+    const endLine = Math.min(
+      renderRange.startingLine + renderRange.totalLines,
+      totalLines
+    );
     let rowCount = 0;
 
     const fileLevelAnnotations = shouldRenderFileAnnotations(renderRange)
@@ -428,60 +635,58 @@ export class FileRenderer<LAnnotation = undefined> {
       rowCount++;
     }
 
-    iterateOverFile({
-      lines,
-      startingLine: renderRange.startingLine,
-      totalLines: renderRange.totalLines,
-      callback: ({ lineIndex, lineNumber }) => {
-        // Sparse array - directly indexed by lineIndex
-        const line = code[lineIndex];
-        if (line == null) {
-          const message = 'FileRenderer.processFileResult: Line doesnt exist';
-          console.error(message, {
-            name: file.name,
-            lineIndex,
-            lineNumber,
-            lines,
-          });
-          throw new Error(message);
-        }
+    for (
+      let lineIndex = renderRange.startingLine;
+      lineIndex < endLine;
+      lineIndex++
+    ) {
+      const lineNumber = lineIndex + 1;
 
-        if (line != null) {
-          // Add gutter line number
-          gutter.children.push(
-            createGutterItem('context', lineNumber, `${lineIndex}`)
-          );
-          contentArray.push(line);
-          rowCount++;
+      // Sparse array - directly indexed by lineIndex
+      const line = code[lineIndex];
+      if (line == null) {
+        const message = 'FileRenderer.processFileResult: Line doesnt exist';
+        console.error(message, {
+          name: file.name,
+          lineIndex,
+          lineNumber,
+        });
+        throw new Error(message);
+      }
 
-          // Check annotations using ACTUAL line number from file
-          const annotations = this.lineAnnotations[lineNumber];
-          if (annotations != null) {
-            gutter.children.push(createGutterGap('context', 'annotation', 1));
-            contentArray.push(
-              createAnnotationElement({
-                type: 'annotation',
-                hunkIndex: 0,
-                lineIndex: lineNumber,
-                annotations: annotations.map((annotation) =>
-                  getLineAnnotationName(annotation)
-                ),
-              })
-            );
-            rowCount++;
-          }
-        }
-      },
-    });
+      // Add gutter line number
+      gutter.children.push(
+        createGutterItem('context', lineNumber, `${lineIndex}`)
+      );
+      contentArray.push(line);
+      rowCount++;
+
+      // Check annotations using ACTUAL line number from file
+      const annotations = this.lineAnnotations[lineNumber];
+      if (annotations != null) {
+        gutter.children.push(createGutterGap('context', 'annotation', 1));
+        contentArray.push(
+          createAnnotationElement({
+            type: 'annotation',
+            hunkIndex: 0,
+            lineIndex: lineNumber,
+            annotations: annotations.map((annotation) =>
+              getLineAnnotationName(annotation)
+            ),
+          })
+        );
+        rowCount++;
+      }
+    }
 
     // Finalize: wrap gutter and content
     gutter.properties.style = `grid-row: span ${rowCount}`;
     return {
       gutterAST: gutter.children ?? [],
       contentAST: contentArray,
-      preAST: this.createPreElement(lines.length),
+      preAST: this.createPreElement(totalLines),
       headerAST: !disableFileHeader ? this.renderHeader(file) : undefined,
-      totalLines: lines.length,
+      totalLines: totalLines,
       rowCount,
       themeStyles: themeStyles,
       baseThemeType,

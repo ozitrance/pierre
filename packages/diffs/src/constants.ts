@@ -41,6 +41,7 @@ export const MERGE_CONFLICT_SEPARATOR_MARKER_REGEX: RegExp = /^={7,}$/;
 export const MERGE_CONFLICT_END_MARKER_REGEX: RegExp = /^>{7,}(?:\s.*)?$/;
 
 export const HEADER_PREFIX_SLOT_ID = 'header-prefix';
+export const HEADER_FILENAME_SUFFIX_SLOT_ID = 'header-filename-suffix';
 export const HEADER_METADATA_SLOT_ID = 'header-metadata';
 export const CUSTOM_HEADER_SLOT_ID = 'header-custom';
 
@@ -53,6 +54,8 @@ export const THEME_CSS_ATTRIBUTE = 'data-theme-css';
 export const UNSAFE_CSS_ATTRIBUTE = 'data-unsafe-css';
 export const CORE_CSS_ATTRIBUTE = 'data-core-css';
 export const DIFFS_SCROLLBAR_MEASURE_ATTRIBUTE = 'data-diffs-scrollbar-measure';
+export const CODE_VIEW_HEADER_ATTRIBUTE = 'data-diffs-code-view-header';
+export const CODE_VIEW_FOOTER_ATTRIBUTE = 'data-diffs-code-view-footer';
 export const DIFFS_SCROLLBAR_GUTTER_MEASURED_PROPERTY =
   '--diffs-scrollbar-gutter-measured';
 
