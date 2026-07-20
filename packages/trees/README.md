@@ -109,6 +109,11 @@ attributes — git status and custom row decorations — render right-aligned in
 every pane, active or not. Directory rows show a descend chevron right after the
 name in every pane; pass `columnsDescendAffordance: false` to drop it.
 
+With `dragAndDrop` enabled, rows drag between panes: drop on a directory row to
+move into it, or on a pane's background to move into that pane's directory.
+Lingering over a directory row springs its listing open as the active pane (tune
+or disable with `openOnDropDelay`), like the tree view's hover-to-expand.
+
 ## Metadata columns
 
 Rows can render right-aligned detail columns — file size, modified time, and a

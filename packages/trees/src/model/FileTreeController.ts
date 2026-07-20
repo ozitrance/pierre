@@ -980,9 +980,11 @@ export class FileTreeController
   }
 
   public startDrag(path: string): boolean {
-    // Drag targets rely on tree topology (ancestor drops, hover-to-expand),
-    // none of which exists in the flat explorer-like listings.
-    if (this.#dragAndDropConfig == null || this.#isExplorerLike) {
+    // Drag targets rely on directory topology under the pointer. The tree and
+    // the columns view both expose it (expanded rows / one pane per directory
+    // on the chain), but the single flat 'explorer' listing does not, so drags
+    // stay disabled there.
+    if (this.#dragAndDropConfig == null || this.#viewMode === 'explorer') {
       return false;
     }
 

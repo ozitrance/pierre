@@ -595,11 +595,17 @@
     flex-direction: column;
   }
 
+  /* The wrapper for the tree items. Scoped to the root element (which
+   * carries the tree / listbox / group role depending on the view mode)
+   * because the columns view puts listbox roles on its scrollable panes,
+   * where a flex layout would break their scroll geometry. */
   [data-file-tree-virtualized-root='true'] {
     height: 100%;
+    position: relative;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    gap: var(--trees-gap-override, 0);
   }
 
   [data-file-tree-virtualized-scroll='true'],
@@ -935,8 +941,7 @@
     display: flex;
     flex-direction: row;
     align-items: stretch;
-    overflow-x: auto;
-    overflow-y: hidden;
+    overflow: auto hidden;
 
     /* Every pane, including the active listing, is the same fixed width —
      * leftover space stays empty (like Finder) so pane widths never jump as
@@ -1004,17 +1009,6 @@
     &[data-align-capitals='true'] {
       transform: rotate(-90deg);
     }
-  }
-
-  /* The wrapper for the tree items. Scoped to the root element (which
-   * carries the tree / listbox / group role depending on the view mode)
-   * because the columns view puts listbox roles on its scrollable panes,
-   * where a flex layout would break their scroll geometry. */
-  [data-file-tree-virtualized-root='true'] {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    gap: var(--trees-gap-override, 0);
   }
 
   /* LIST ITEM */
@@ -1575,6 +1569,21 @@
 
   [data-item-dragging='true'] {
     opacity: 0.5;
+  }
+
+  /* Columns mode: hovering a pane's background (not a row) targets the pane's
+   * own directory, so the whole pane takes the drop highlight — matching the
+   * row treatment above, Finder-style. */
+  [data-file-tree-column-drag-target='true'] {
+    background-color: var(--trees-selected-bg);
+  }
+
+  /* The active pane's virtualized list paints an opaque --trees-bg (it masks
+   * sticky-overlay handoffs in tree mode). While the pane is the drop target,
+   * let the pane tint show through instead of surfacing only in the gutters. */
+  [data-file-tree-column-drag-target='true']
+    [data-file-tree-virtualized-list='true'] {
+    background-color: transparent;
   }
 
   /* Lock icon for locked paths (sibling of content) */

@@ -292,7 +292,7 @@ function getShadowPointElementByGeometry(
 ): HTMLElement | null {
   const candidates = Array.from(
     rootNode.querySelectorAll<HTMLElement>(
-      '[data-type="item"], [data-item-flattened-subitem]'
+      '[data-type="item"], [data-item-flattened-subitem], [data-file-tree-drop-directory]'
     )
   );
   for (let index = candidates.length - 1; index >= 0; index--) {
@@ -311,12 +311,51 @@ function getShadowPointElementByGeometry(
   return null;
 }
 
+// Columns-view panes mark themselves with `data-file-tree-drop-directory`, so
+// hovering a pane's background (below or between rows) drops into the pane's
+// own directory — the only way to reach an empty directory pane.
+function resolvePaneBackgroundDropTarget(
+  target: HTMLElement | null
+): FileTreeDropTarget | null {
+  const pane = target?.closest?.('[data-file-tree-drop-directory]');
+  if (!(pane instanceof HTMLElement)) {
+    return null;
+  }
+
+  const directoryPath = pane.getAttribute('data-file-tree-drop-directory');
+  if (directoryPath == null) {
+    return null;
+  }
+
+  return {
+    directoryPath: directoryPath.length > 0 ? directoryPath : null,
+    flattenedSegmentPath: null,
+    hoveredPath: null,
+    kind: directoryPath.length > 0 ? 'directory' : 'root',
+  };
+}
+
+// True when `dragTarget` is the background of the pane listing
+// `paneDirectoryPath` — hovering a row keeps the highlight on the row itself.
+function isPaneBackgroundDropTarget(
+  dragTarget: FileTreeDropTarget | null,
+  paneDirectoryPath: string
+): boolean {
+  if (dragTarget == null || dragTarget.hoveredPath != null) {
+    return false;
+  }
+
+  return paneDirectoryPath.length > 0
+    ? dragTarget.directoryPath === paneDirectoryPath
+    : dragTarget.kind === 'root';
+}
+
 function resolveDropTargetFromElement(
   target: HTMLElement | null
 ): FileTreeDropTarget | null {
   const rowButton = target?.closest?.('[data-type="item"]');
   if (!(rowButton instanceof HTMLElement)) {
-    return null;
+    return resolvePaneBackgroundDropTarget(target);
   }
 
   const hoveredPath = rowButton.dataset.itemPath ?? null;
@@ -1333,20 +1372,43 @@ function renderRangeChildren(
     );
 }
 
+// Everything a columns-view side-pane row needs that does not vary per row.
+// Built once per render of the view and shared by every pane so side-pane rows
+// stay on the same drag session and lane frame as the active pane.
+type FileTreeSideColumnRowFrame = {
+  dragAndDropEnabled: boolean;
+  draggedPathSet: ReadonlySet<string> | null;
+  dragTarget: FileTreeDropTarget | null;
+  itemHeight: number;
+  lanes: FileTreeRowLaneFrame;
+  onRowClick: (event: MouseEvent, row: FileTreeVisibleRow) => void;
+  onRowDragEnd: () => void;
+  onRowDragStart: (
+    event: DragEvent,
+    row: FileTreeVisibleRow,
+    targetPath: string
+  ) => void;
+  onRowTouchStart: (
+    event: TouchEvent,
+    row: FileTreeVisibleRow,
+    targetPath: string
+  ) => void;
+  resolveIcon: ReturnType<typeof createFileTreeIconResolver>['resolveIcon'];
+  showDescendAffordance: boolean;
+};
+
 // Renders one row of a columns-view side pane: the shared row contract minus
-// drag, rename, and context-menu wiring, plus the ancestor-chain highlight and
-// a descend affordance on directories. Attribute lanes come from the same
-// lane frame as the active pane so a listing looks identical in every role.
+// rename and context-menu wiring, plus the ancestor-chain highlight and a
+// descend affordance on directories. Attribute lanes and drag state come from
+// the same frames as the active pane so a listing looks identical in every
+// role and rows can be dragged from — and dropped on — any pane.
 function renderExplorerColumnRow(
   row: FileTreeVisibleRow,
   column: FileTreeExplorerColumn,
-  lanes: FileTreeRowLaneFrame,
-  itemHeight: number,
-  resolveIcon: ReturnType<typeof createFileTreeIconResolver>['resolveIcon'],
-  onRowClick: (event: MouseEvent, row: FileTreeVisibleRow) => void,
-  showDescendAffordance: boolean,
+  frame: FileTreeSideColumnRowFrame,
   key: string | number
 ): JSX.Element {
+  const { dragAndDropEnabled, draggedPathSet, dragTarget, lanes } = frame;
   const isChainSelected = row.path === column.selectedPath;
   const {
     containsGitChange,
@@ -1367,15 +1429,17 @@ function renderExplorerColumnRow(
       gitLaneActive: lanes.gitLaneActive,
     },
     isParked: false,
-    itemHeight,
+    itemHeight: frame.itemHeight,
     mode: 'flow',
     row,
     state: {
       containsGitChange,
       effectiveGitStatus,
       isContextHovered: false,
-      isDragTarget: false,
-      isDragging: false,
+      isDragTarget:
+        dragTarget?.kind === 'directory' &&
+        dragTarget.directoryPath === row.path,
+      isDragging: draggedPathSet?.has(row.path) === true,
       isFocusRinged: false,
     },
     targetPath: row.path,
@@ -1389,11 +1453,27 @@ function renderExplorerColumnRow(
       type="button"
       aria-selected={isChainSelected || row.isSelected ? 'true' : 'false'}
       data-item-chain-selected={isChainSelected ? 'true' : undefined}
+      draggable={dragAndDropEnabled}
+      onDragEnd={dragAndDropEnabled ? frame.onRowDragEnd : undefined}
+      onDragStart={
+        dragAndDropEnabled
+          ? (event) => {
+              frame.onRowDragStart(event, row, row.path);
+            }
+          : undefined
+      }
+      onTouchStart={
+        dragAndDropEnabled
+          ? (event) => {
+              frame.onRowTouchStart(event, row, row.path);
+            }
+          : undefined
+      }
       onClick={(event) => {
-        onRowClick(event, row);
+        frame.onRowClick(event, row);
       }}
     >
-      {renderFileTreeRowContent(row, resolveIcon, {
+      {renderFileTreeRowContent(row, frame.resolveIcon, {
         actionLaneEnabled: lanes.actionLaneEnabled,
         columns: lanes.columns,
         customDecoration,
@@ -1403,7 +1483,7 @@ function renderExplorerColumnRow(
         gitLaneActive: lanes.gitLaneActive,
         metadata,
         showDecorativeActionAffordance: lanes.showDecorativeActionAffordance,
-        showDescendAffordance,
+        showDescendAffordance: frame.showDescendAffordance,
       })}
     </button>
   );
@@ -1413,12 +1493,8 @@ type FileTreeSideColumnProps = {
   column: FileTreeExplorerColumn;
   controller: FileTreeController;
   initialViewportHeight: number;
-  itemHeight: number;
-  lanes: FileTreeRowLaneFrame;
-  onRowClick: (event: MouseEvent, row: FileTreeVisibleRow) => void;
   overscan: number;
-  resolveIcon: ReturnType<typeof createFileTreeIconResolver>['resolveIcon'];
-  showDescendAffordance: boolean;
+  rowFrame: FileTreeSideColumnRowFrame;
 };
 
 // One ancestor or preview pane of the columns view. Each pane owns its own
@@ -1429,14 +1505,11 @@ function FileTreeSideColumn({
   column,
   controller,
   initialViewportHeight,
-  itemHeight,
-  lanes,
-  onRowClick,
   overscan,
-  resolveIcon,
-  showDescendAffordance,
+  rowFrame,
 }: FileTreeSideColumnProps): JSX.Element {
   'use no memo';
+  const { itemHeight } = rowFrame;
   const scrollElementRef = useRef<HTMLDivElement>(null);
   const rangeRef = useRef(EMPTY_RANGE);
   // Re-render trigger only; the render below reads the live scrollTop so a
@@ -1509,6 +1582,14 @@ function FileTreeSideColumn({
       ref={scrollElementRef}
       aria-label={column.name.length > 0 ? column.name : '/'}
       data-file-tree-column={column.kind}
+      data-file-tree-column-drag-target={
+        isPaneBackgroundDropTarget(rowFrame.dragTarget, column.directoryPath)
+          ? 'true'
+          : undefined
+      }
+      data-file-tree-drop-directory={
+        rowFrame.dragAndDropEnabled ? column.directoryPath : undefined
+      }
       role="listbox"
       onScroll={() => {
         const scrollElement = scrollElementRef.current;
@@ -1547,11 +1628,7 @@ function FileTreeSideColumn({
             renderExplorerColumnRow(
               row,
               column,
-              lanes,
-              itemHeight,
-              resolveIcon,
-              onRowClick,
-              showDescendAffordance,
+              rowFrame,
               range.start + slotIndex
             )
           )}
@@ -2237,16 +2314,43 @@ export function FileTreeView({
       return;
     }
 
-    const targetItem = controller.getItem(nextTarget.directoryPath);
-    const directoryItem = isFileTreeDirectoryHandle(targetItem)
-      ? targetItem
-      : null;
-    if (directoryItem == null || directoryItem.isExpanded()) {
+    // Hover-to-open means something different per mode: the tree expands the
+    // hovered directory in place, while the columns view navigates so the
+    // hovered directory's listing becomes the active pane (spring-loaded
+    // panes, Finder-style). Both skip directories whose children are already
+    // on screen.
+    const directoryPath = nextTarget.directoryPath;
+    let openDirectory: (() => void) | null = null;
+    if (isColumnsMode) {
+      const isListingOnScreen =
+        explorerDirectoryPath === directoryPath ||
+        explorerDirectoryPath.startsWith(directoryPath) ||
+        explorerPreviewColumn?.directoryPath === directoryPath;
+      openDirectory = isListingOnScreen
+        ? null
+        : () => {
+            controller.navigateToDirectory(directoryPath);
+          };
+    } else {
+      const targetItem = controller.getItem(directoryPath);
+      const directoryItem = isFileTreeDirectoryHandle(targetItem)
+        ? targetItem
+        : null;
+      openDirectory =
+        directoryItem == null || directoryItem.isExpanded()
+          ? null
+          : () => {
+              directoryItem.expand();
+            };
+    }
+
+    if (openDirectory == null) {
       clearDragHoverOpen();
       return;
     }
 
-    const nextKey = `${nextTarget.directoryPath}::${nextTarget.flattenedSegmentPath ?? ''}`;
+    const resolvedOpenDirectory = openDirectory;
+    const nextKey = `${directoryPath}::${nextTarget.flattenedSegmentPath ?? ''}`;
     if (dragHoverOpenKeyRef.current === nextKey) {
       return;
     }
@@ -2257,25 +2361,49 @@ export function FileTreeView({
       const currentTarget = controller.getDragSession()?.target;
       if (
         currentTarget?.kind !== 'directory' ||
-        currentTarget.directoryPath !== nextTarget.directoryPath ||
+        currentTarget.directoryPath !== directoryPath ||
         currentTarget.flattenedSegmentPath !== nextTarget.flattenedSegmentPath
       ) {
         return;
       }
 
-      directoryItem.expand();
+      resolvedOpenDirectory();
     }, openDelay);
+  };
+
+  // Each columns-view side pane owns its own vertical scroll, so edge
+  // auto-scroll drives whichever pane sits under the pointer; anywhere else
+  // (tree mode, the active pane, the chrome around the panes) it stays on the
+  // main virtualized list.
+  const resolveDragScrollElement = (
+    clientX: number,
+    clientY: number
+  ): HTMLElement | null => {
+    const rootNode = rootRef.current?.getRootNode();
+    const pointRoot = rootNode instanceof ShadowRoot ? rootNode : document;
+    const pointElement = getPointElement(pointRoot, clientX, clientY);
+    const sideColumnElement = pointElement?.closest?.(
+      '[data-file-tree-column]'
+    );
+    if (sideColumnElement instanceof HTMLElement) {
+      return sideColumnElement;
+    }
+
+    return scrollRef.current;
   };
 
   const runDragAutoScroll = (): void => {
     dragAutoScrollFrameRef.current = null;
     const dragPoint = dragPointRef.current;
-    const scrollElement = scrollRef.current;
-    if (
-      dragPoint == null ||
-      scrollElement == null ||
-      controller.getDragSession() == null
-    ) {
+    if (dragPoint == null || controller.getDragSession() == null) {
+      return;
+    }
+
+    const scrollElement = resolveDragScrollElement(
+      dragPoint.clientX,
+      dragPoint.clientY
+    );
+    if (scrollElement == null) {
       return;
     }
 
@@ -2295,7 +2423,10 @@ export function FileTreeView({
     );
     if (boundedScrollTop !== scrollElement.scrollTop) {
       scrollElement.scrollTop = boundedScrollTop;
-      updateViewportRef.current();
+      if (scrollElement === scrollRef.current) {
+        updateViewportRef.current();
+      }
+      // Side panes rebuild their row window from their own scroll events.
     }
 
     const nextTarget = syncDropTargetFromPoint(
@@ -2313,10 +2444,15 @@ export function FileTreeView({
       requestDragAnimationFrame(runDragAutoScroll);
   };
 
+  // `capturePark` keeps the dragged row parked in the active flow if
+  // virtualization ejects it mid-drag. Columns-view side panes pass false:
+  // their rows are not part of the active flow, so a parked copy would render
+  // at a meaningless offset there.
   const handleRowDragStart = (
     event: DragEvent,
     row: FileTreeVisibleRow,
-    targetPath: string
+    targetPath: string,
+    capturePark: boolean = true
   ): void => {
     const dragSource = event.currentTarget as HTMLElement | null;
     if (dragSource == null) {
@@ -2332,7 +2468,7 @@ export function FileTreeView({
       return;
     }
 
-    dragRowSnapshotRef.current = row;
+    dragRowSnapshotRef.current = capturePark ? row : null;
     if (event.dataTransfer != null) {
       event.dataTransfer.effectAllowed = 'move';
       event.dataTransfer.dropEffect = 'move';
@@ -2369,7 +2505,8 @@ export function FileTreeView({
   const handleRowTouchStart = (
     event: TouchEvent,
     row: FileTreeVisibleRow,
-    targetPath: string
+    targetPath: string,
+    capturePark: boolean = true
   ): void => {
     if (touchLongPressTimerRef.current != null || touchDragActiveRef.current) {
       return;
@@ -2459,7 +2596,7 @@ export function FileTreeView({
       touchSourceElementRef.current = dragSource;
       dragSource.setAttribute('draggable', 'false');
       dragSource.style.setProperty('touch-action', 'none');
-      dragRowSnapshotRef.current = row;
+      dragRowSnapshotRef.current = capturePark ? row : null;
       const rect = dragSource.getBoundingClientRect();
       const preview = createDragPreviewElement(dragSource);
       Object.assign(preview.style, {
@@ -4077,6 +4214,26 @@ export function FileTreeView({
     showDecorativeActionAffordance:
       actionLaneEnabled && contextMenuButtonVisibility === 'always',
   };
+  // Shared by every columns-view side pane. Side-pane drag sources skip the
+  // parked-row snapshot (see handleRowDragStart) but otherwise ride the same
+  // drag session as the active pane.
+  const sideColumnRowFrame: FileTreeSideColumnRowFrame = {
+    dragAndDropEnabled,
+    draggedPathSet,
+    dragTarget,
+    itemHeight,
+    lanes: rowLanes,
+    onRowClick: handleColumnRowClick,
+    onRowDragEnd: handleRowDragEnd,
+    onRowDragStart: (event, row, targetPath) => {
+      handleRowDragStart(event, row, targetPath, false);
+    },
+    onRowTouchStart: (event, row, targetPath) => {
+      handleRowTouchStart(event, row, targetPath, false);
+    },
+    resolveIcon,
+    showDescendAffordance: descendAffordanceEnabled,
+  };
   // Everything renderStyledRow needs that does not vary per row. Splitting
   // sticky vs flow here means the two paths share an identical contract except
   // for where each ref is registered, which is the invariant sticky reuse
@@ -4264,12 +4421,8 @@ export function FileTreeView({
               column={column}
               controller={controller}
               initialViewportHeight={initialViewportHeight}
-              itemHeight={itemHeight}
-              lanes={rowLanes}
-              onRowClick={handleColumnRowClick}
               overscan={overscan}
-              resolveIcon={resolveIcon}
-              showDescendAffordance={descendAffordanceEnabled}
+              rowFrame={sideColumnRowFrame}
             />
           ))}
         <div
@@ -4277,6 +4430,17 @@ export function FileTreeView({
           aria-label={
             isColumnsMode
               ? (explorerBreadcrumbs?.at(-1)?.name ?? '/')
+              : undefined
+          }
+          data-file-tree-column-drag-target={
+            isColumnsMode &&
+            isPaneBackgroundDropTarget(dragTarget, explorerDirectoryPath)
+              ? 'true'
+              : undefined
+          }
+          data-file-tree-drop-directory={
+            isColumnsMode && dragAndDropEnabled
+              ? explorerDirectoryPath
               : undefined
           }
           data-file-tree-virtualized-scroll="true"
@@ -4382,12 +4546,8 @@ export function FileTreeView({
             column={explorerPreviewColumn}
             controller={controller}
             initialViewportHeight={initialViewportHeight}
-            itemHeight={itemHeight}
-            lanes={rowLanes}
-            onRowClick={handleColumnRowClick}
             overscan={overscan}
-            resolveIcon={resolveIcon}
-            showDescendAffordance={descendAffordanceEnabled}
+            rowFrame={sideColumnRowFrame}
           />
         ) : null}
       </div>

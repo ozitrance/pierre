@@ -341,14 +341,17 @@ describe('file-tree columns mode', () => {
     controller.destroy();
   });
 
-  test('drag, sticky rows, and out-of-listing renames stay disabled in columns mode', async () => {
+  test('sticky rows and out-of-listing renames stay disabled in columns mode', async () => {
     const controller = await createColumnsController({
       dragAndDrop: true,
       renaming: true,
     });
 
     controller.navigateToDirectory('src');
-    expect(controller.startDrag('src/app.ts')).toBe(false);
+    // Drags work in columns mode — any pane row is a valid source, including
+    // rows outside the active listing.
+    expect(controller.startDrag('docs/guide.md')).toBe(true);
+    controller.cancelDrag();
     expect(controller.getStickyRowCandidates(120, 28)).toEqual([]);
     // Rows outside the active listing cannot mount a rename input.
     expect(controller.startRenaming('docs/guide.md')).toBe(false);
