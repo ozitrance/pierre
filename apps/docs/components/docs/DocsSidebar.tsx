@@ -3,6 +3,7 @@
 import { usePathname } from 'next/navigation';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
+import { BetaBadge } from '@/components/BetaBadge';
 import { MobileNavLink } from '@/components/MobileNavLink';
 import NavLink from '@/components/NavLink';
 import {
@@ -25,6 +26,26 @@ interface HeadingItem {
   text: string;
   level: number;
   element: HTMLElement;
+  isBeta: boolean;
+}
+
+// Read a heading's label without the permalink anchor or any Beta badge that a
+// React-managed heading may render, so the sidebar shows clean text (e.g.
+// "Edit mode" rather than "Edit modeBeta") and can mirror the badge separately.
+function getHeadingLabel(element: HTMLElement): string {
+  let text = '';
+  for (const node of element.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      text += node.textContent ?? '';
+    } else if (
+      node instanceof HTMLElement &&
+      !node.hasAttribute('data-heading-badge') &&
+      !node.classList.contains('heading-anchor')
+    ) {
+      text += node.textContent ?? '';
+    }
+  }
+  return text.trim();
 }
 
 export function DocsSidebar({
@@ -34,6 +55,12 @@ export function DocsSidebar({
   const pathname = usePathname();
   const product = getProductFromPathname(pathname);
   const navRef = useRef<HTMLElement>(null);
+
+  // Mirror the desktop nav's active treatment: home matches exactly, while
+  // section links (Edit, Docs, Theme) match their path prefix.
+  const homePath = product.basePath !== '' ? product.basePath : '/';
+  const isActivePath = (target: string) =>
+    target === homePath ? pathname === target : pathname.startsWith(target);
   const [headings, setHeadings] = useState<HeadingItem[]>([]);
   const [activeHeading, setActiveHeading] = useState<string>('');
 
@@ -48,15 +75,17 @@ export function DocsSidebar({
         continue;
       }
 
-      const text = element.textContent ?? '';
+      const text = getHeadingLabel(element);
       const level = parseInt(element.tagName.charAt(1));
       const id = element.id;
+      const isBeta = element.querySelector('[data-heading-badge]') != null;
 
       headingItems.push({
         id,
         text,
         level,
         element,
+        isBeta,
       });
     }
 
@@ -146,12 +175,23 @@ export function DocsSidebar({
       >
         {isMobileOpen && (
           <div className="border-border mb-4 border-b pb-4 md:hidden">
-            <MobileNavLink
-              href={product.basePath !== '' ? product.basePath : '/'}
-            >
+            <MobileNavLink href={homePath} active={isActivePath(homePath)}>
               Home
             </MobileNavLink>
-            <MobileNavLink href={product.docsPath}>Docs</MobileNavLink>
+            {product.id === 'diffs' && (
+              <MobileNavLink
+                href={`${product.basePath}/edit`}
+                active={isActivePath(`${product.basePath}/edit`)}
+              >
+                Edit
+              </MobileNavLink>
+            )}
+            <MobileNavLink
+              href={product.docsPath}
+              active={isActivePath(product.docsPath)}
+            >
+              Docs
+            </MobileNavLink>
             {product.id === 'diffs' && (
               <MobileNavLink
                 href={
@@ -177,6 +217,7 @@ export function DocsSidebar({
                   : DIFFS_THEME_PATH
               }
               external={isTrees}
+              active={!isTrees && isActivePath(DIFFS_THEME_PATH)}
             >
               Theme
             </MobileNavLink>
@@ -189,7 +230,14 @@ export function DocsSidebar({
             active={activeHeading === heading.id}
             className={`mr-[2px] ${heading.level === 3 ? 'ml-4' : ''}`}
           >
-            {heading.text}
+            {heading.isBeta ? (
+              <span className="inline-flex items-center gap-1.5">
+                {heading.text}
+                <BetaBadge className="px-1.5 py-px text-[10px] tracking-normal" />
+              </span>
+            ) : (
+              heading.text
+            )}
           </NavLink>
         ))}
       </nav>

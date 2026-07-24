@@ -184,15 +184,23 @@ export interface SetRenderOptionsWorkerTask {
   requestStart: number;
 }
 
+export interface RenderTaskCallbacks {
+  resolve(): void;
+  reject(error: Error): void;
+}
+
 export interface RenderFileTask {
   type: 'file';
   id: WorkerRequestId;
   request: RenderFileRequest;
+  /** Cache key included in the payload when it was dispatched to the worker. */
+  cacheKeyAtDispatch?: string;
   instances: Set<FileRendererInstance>;
   // If primeCache is true, then the request will still be sent to workers
   // regardless of whether there's any instances subscribed to the task
   primeCache: boolean;
   highlightKey?: string;
+  callbacks: Set<RenderTaskCallbacks>;
   renderOptionsVersion: number;
   requestStart: number;
 }
@@ -201,11 +209,14 @@ export interface RenderDiffTask {
   type: 'diff';
   id: WorkerRequestId;
   request: RenderDiffRequest;
+  /** Cache key included in the payload when it was dispatched to the worker. */
+  cacheKeyAtDispatch?: string;
   instances: Set<DiffRendererInstance>;
   // If primeCache is true, then the request will still be sent to workers
   // regardless of whether there's any instances subscribed to the task
   primeCache: boolean;
   highlightKey?: string;
+  callbacks: Set<RenderTaskCallbacks>;
   renderOptionsVersion: number;
   requestStart: number;
 }

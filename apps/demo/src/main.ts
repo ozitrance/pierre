@@ -5,6 +5,7 @@ import {
   File,
   type FileContents,
   FileDiff,
+  type FileDiffContentsLoader,
   type FileDiffOptions,
   type FileOptions,
   FileStream,
@@ -21,7 +22,16 @@ import {
   VirtualizedFileDiff,
   Virtualizer,
 } from '@pierre/diffs';
+import { Editor } from '@pierre/diffs/edit';
 import type { WorkerPoolManager } from '@pierre/diffs/worker';
+import {
+  IconCiFailedOctagonFill,
+  IconCiWarningFill,
+  IconInfoFill,
+} from '@pierre/icons';
+import { createTwoFilesPatch } from 'diff';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 
 import {
   cleanupCodeView,
@@ -42,6 +52,7 @@ import './style.css';
 import mdContent from './mocks/example_md.txt?raw';
 import tsContent from './mocks/example_ts.txt?raw';
 import { createFakeContentStream } from './utils/createFakeContentStream';
+import { createHeaderFilenameSuffixBadge } from './utils/createHeaderFilenameSuffixBadge';
 import { createHighlighterCleanup } from './utils/createHighlighterCleanup';
 import { createWorkerAPI } from './utils/createWorkerAPI';
 import {
@@ -56,7 +67,36 @@ const WORKER_POOL = true;
 const VIRTUALIZE = true;
 const CRAZY_FILE = false;
 const LARGE_CONFLICT_FILE = false;
-const CODE_VIEW_OLD_NEW_FILE = true;
+const RENDER_FILENAME_SUFFIX = false;
+const CODE_VIEW_TYPE: 'old-new-full' | 'old-new-hydration' | 'patch-file' =
+  'old-new-full';
+
+// Pre-render the @pierre/icons SVG markup once so it can be embedded into the
+// `message.html` strings the editor injects for markers. The icons default to
+// `fill: currentcolor`, so each one inherits the surrounding text color.
+const MARKER_INFO_ICON = renderToStaticMarkup(
+  createElement(IconInfoFill, { size: 16 })
+);
+const MARKER_WARNING_ICON = renderToStaticMarkup(
+  createElement(IconCiWarningFill, { size: 16 })
+);
+const MARKER_ERROR_ICON = renderToStaticMarkup(
+  createElement(IconCiFailedOctagonFill, { size: 16 })
+);
+
+// Builds the HTML for a marker overlay: a leading icon and message with an
+// indented description. The popover is severity-colored (see editor.css), so
+// the icon and text inherit white instead of painting their own color, which
+// would vanish against the fill.
+function markerMessage(opts: {
+  icon: string;
+  message: string;
+  description: string;
+}): string {
+  const iconCol = `<span style="display:inline-flex;flex:none;margin-top:2px">${opts.icon}</span>`;
+  const textCol = `<div style="display:flex;flex-direction:column;gap:2px">${opts.message}<div style="opacity:0.8">${opts.description}</div></div>`;
+  return `<div style="display:flex;align-items:flex-start;gap:8px">${iconCol}${textCol}</div>`;
+}
 
 const FileStreamCodeConfigs: FileStreamCodeConfigsItem[] = [
   {
@@ -93,6 +133,14 @@ interface FileStreamCodeConfigsItem {
   options: FileStreamOptions;
 }
 
+interface HydratableRenderOptions {
+  loadDiffFiles?: FileDiffContentsLoader;
+}
+
+interface CodeViewRenderData extends HydratableRenderOptions {
+  parsedPatches: ParsedPatch[];
+}
+
 function cleanupInstances(container: HTMLElement) {
   for (const instances of [
     diffInstances,
@@ -108,7 +156,17 @@ function cleanupInstances(container: HTMLElement) {
   cleanupCodeView(container);
   container.textContent = '';
   delete container.dataset.diff;
+  editShortcutCallback = undefined;
 }
+
+let editShortcutCallback: (() => boolean | void) | undefined;
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'e') {
+    if (editShortcutCallback?.() === false) {
+      event.preventDefault();
+    }
+  }
+});
 
 let loadingPatch: Promise<string> | undefined;
 async function loadPatchContent() {
@@ -176,39 +234,139 @@ function startStreaming() {
 }
 
 let parsedPatches: ParsedPatch[] | undefined;
-let parsedCodeViewFilePatches: ParsedPatch[] | undefined;
 
-function createCodeViewFilePatches(): ParsedPatch[] {
+function createCodeViewFiles(): {
+  oldFile: FileContents;
+  newFile: FileContents;
+} {
+  return {
+    oldFile: {
+      name: 'file_old.ts',
+      contents: FILE_OLD,
+      cacheKey: 'code-view-file-old',
+    },
+    newFile: {
+      name: 'file_new.ts',
+      contents: FILE_NEW,
+      cacheKey: 'code-view-file-new',
+    },
+  };
+}
+
+function createCodeViewNoTrailingExpansionFiles(): {
+  oldFile: FileContents;
+  newFile: FileContents;
+} {
   const oldFile: FileContents = {
-    name: 'file_old.ts',
-    contents: FILE_OLD,
-    cacheKey: 'code-view-file-old',
+    name: 'no_trailing_expansion.ts',
+    contents: [
+      'const keepOne = "same";\n',
+      'const keepTwo = "same";\n',
+      'const keepThree = "same";\n',
+      'const keepFour = "same";\n',
+      'export const noTrailingExpansion = "old";\n',
+    ].join(''),
+    cacheKey: 'code-view-no-trailing-expansion-old',
   };
   const newFile: FileContents = {
-    name: 'file_new.ts',
-    contents: FILE_NEW,
-    cacheKey: 'code-view-file-new',
+    name: oldFile.name,
+    contents: [
+      'const keepOne = "same";\n',
+      'const keepTwo = "same";\n',
+      'const keepThree = "same";\n',
+      'const keepFour = "same";\n',
+      'export const noTrailingExpansion = "new";\n',
+    ].join(''),
+    cacheKey: 'code-view-no-trailing-expansion-new',
   };
+  return { oldFile, newFile };
+}
 
+function createCodeViewFullPatches(
+  oldFile: FileContents,
+  newFile: FileContents
+): ParsedPatch[] {
   return [{ files: [parseDiffFromFile(oldFile, newFile)] }];
 }
 
-async function loadCodeViewPatches(): Promise<ParsedPatch[]> {
-  if (CODE_VIEW_OLD_NEW_FILE) {
-    return (parsedCodeViewFilePatches ??= createCodeViewFilePatches());
+function createCodeViewPartialPatches(
+  oldFile: FileContents,
+  newFile: FileContents
+): ParsedPatch[] {
+  return parsePatchFiles(
+    createTwoFilesPatch(
+      oldFile.name,
+      newFile.name,
+      oldFile.contents,
+      newFile.contents,
+      oldFile.header,
+      newFile.header
+    ),
+    'code-view-partial'
+  );
+}
+
+function createCodeViewNoTrailingExpansionPartialPatches(
+  oldFile: FileContents,
+  newFile: FileContents
+): ParsedPatch[] {
+  return parsePatchFiles(
+    createTwoFilesPatch(
+      oldFile.name,
+      newFile.name,
+      oldFile.contents,
+      newFile.contents,
+      oldFile.header,
+      newFile.header,
+      { context: 0 }
+    ),
+    'code-view-no-trailing-expansion-partial'
+  );
+}
+
+async function loadCodeViewPatches(): Promise<CodeViewRenderData> {
+  switch (CODE_VIEW_TYPE) {
+    case 'old-new-full': {
+      const { oldFile, newFile } = createCodeViewFiles();
+      return { parsedPatches: createCodeViewFullPatches(oldFile, newFile) };
+    }
+    case 'old-new-hydration': {
+      const { oldFile, newFile } = createCodeViewFiles();
+      const noTrailingExpansionFiles = createCodeViewNoTrailingExpansionFiles();
+      return {
+        parsedPatches: [
+          ...createCodeViewNoTrailingExpansionPartialPatches(
+            noTrailingExpansionFiles.oldFile,
+            noTrailingExpansionFiles.newFile
+          ),
+          ...createCodeViewPartialPatches(oldFile, newFile),
+        ],
+        loadDiffFiles(fileDiff) {
+          console.log(
+            'CodeView partial hydration demo loading full files',
+            fileDiff
+          );
+          if (fileDiff.name === noTrailingExpansionFiles.newFile.name) {
+            return Promise.resolve(noTrailingExpansionFiles);
+          }
+          return Promise.resolve({ oldFile, newFile });
+        },
+      };
+    }
+    case 'patch-file':
+      return {
+        parsedPatches: (parsedPatches ??= parsePatchFiles(
+          await loadPatchContent(),
+          'parsed-patch'
+        )),
+      };
   }
-  return (parsedPatches ??= parsePatchFiles(
-    await loadPatchContent(),
-    'parsed-patch'
-  ));
 }
 
 function handlePreloadCodeViewDiff() {
-  if (CODE_VIEW_OLD_NEW_FILE) {
-    parsedCodeViewFilePatches ??= createCodeViewFilePatches();
-    return;
+  if (CODE_VIEW_TYPE === 'patch-file') {
+    void handlePreloadDiff();
   }
-  void handlePreloadDiff();
 }
 
 async function handlePreloadDiff() {
@@ -239,15 +397,42 @@ function renderDiff(parsedPatches: ParsedPatch[], manager?: WorkerPoolManager) {
     const patchAnnotations = FAKE_DIFF_LINE_ANNOTATIONS[patchIndex] ?? [];
     let hunkIndex = 0;
     for (const fileDiff of parsedPatch.files) {
+      const editor = new Editor<LineCommentMetadata>({
+        onAttach: (editor) => {
+          editor.setSelections([
+            {
+              start: {
+                line: 3,
+                character: 1000, // will be normalized to the end of the line(< 1000 chars)
+              },
+              end: {
+                line: 3,
+                character: 1000, // will be normalized to the end of the line(< 1000 chars)
+              },
+              direction: 'none',
+            },
+          ]);
+        },
+        __debug: true,
+      });
       const fileAnnotations = patchAnnotations[hunkIndex];
+      let isEditing = false;
       const options: FileDiffOptions<LineCommentMetadata> = {
         theme: DEMO_THEME,
         themeType,
         diffStyle: unified ? 'unified' : 'split',
         overflow: wrap ? 'wrap' : 'scroll',
         renderAnnotation: renderDiffAnnotation,
+        ...(RENDER_FILENAME_SUFFIX
+          ? {
+              renderHeaderFilenameSuffix() {
+                return createHeaderFilenameSuffixBadge('Diff slot');
+              },
+            }
+          : null),
         renderHeaderMetadata() {
-          return createCollapsedToggle(
+          const collapseToggle = createToggle(
+            'Collapse',
             instance?.options.collapsed ?? false,
             (checked) => {
               instance?.setOptions({
@@ -259,6 +444,32 @@ function renderDiff(parsedPatches: ParsedPatch[], manager?: WorkerPoolManager) {
               }
             }
           );
+          const editableToggle = createToggle(
+            'Editable',
+            isEditing,
+            (checked) => {
+              isEditing = checked;
+              if (isEditing) {
+                editor.edit(instance);
+              } else {
+                editor.cleanUp();
+              }
+            }
+          );
+          editShortcutCallback = (): boolean | void => {
+            if (!isEditing) {
+              editableToggle.querySelector('input')?.click();
+              return false;
+            }
+          };
+          const div = document.createElement('div');
+          div.style.display = 'flex';
+          div.style.gap = '8px';
+          div.append(collapseToggle);
+          if (!fileDiff.isPartial) {
+            div.append(editableToggle);
+          }
+          return div;
         },
         lineHoverHighlight: 'both',
         expansionLineCount: 10,
@@ -444,7 +655,10 @@ function renderDiff(parsedPatches: ParsedPatch[], manager?: WorkerPoolManager) {
   // window.scrollTo({ top: 70747 });
 }
 
-function renderCodeView(parsedPatches: ParsedPatch[]) {
+function renderCodeView(
+  parsedPatches: ParsedPatch[],
+  { loadDiffFiles }: HydratableRenderOptions = {}
+) {
   const wrapper = document.getElementById('wrapper');
   if (wrapper == null) return;
   window.scrollTo({ top: 0 });
@@ -454,6 +668,7 @@ function renderCodeView(parsedPatches: ParsedPatch[]) {
     themeType: getThemeType(),
     diffStyle: getUnified() ? 'unified' : 'split',
     overflow: getWrapped() ? 'wrap' : 'scroll',
+    loadDiffFiles,
     workerManager: poolManager,
   });
 }
@@ -547,7 +762,8 @@ const renderCodeViewButton = document.getElementById('render-code-view');
 if (renderCodeViewButton != null) {
   renderCodeViewButton.addEventListener('click', () => {
     void (async () => {
-      renderCodeView(await loadCodeViewPatches());
+      const { parsedPatches, loadDiffFiles } = await loadCodeViewPatches();
+      renderCodeView(parsedPatches, { loadDiffFiles });
     })();
   });
   renderCodeViewButton.addEventListener(
@@ -735,7 +951,7 @@ const fileConflict: FileContents = {
 
 const renderFileButton = document.getElementById('render-file');
 if (renderFileButton != null) {
-  // oxlint-disable-next-line @typescript-oxlint/no-misused-promises
+  // oxlint-disable-next-line typescript/no-misused-promises
   renderFileButton.addEventListener('click', async () => {
     const file = await fileExample;
     const wrapper = document.getElementById('wrapper');
@@ -744,15 +960,121 @@ if (renderFileButton != null) {
 
     virtualizer?.setup(globalThis.document);
     const wrap = getWrapped();
+    const editor = new Editor<LineCommentMetadata>({
+      enabledSelectionAction: true,
+      renderSelectionAction: (ctx) => {
+        const div = document.createElement('div');
+        const button = document.createElement('button');
+        button.innerText = `Comment the selection`;
+        button.addEventListener('click', () => {
+          const lines = ctx.getSelectionText().split('\n');
+          const comment = lines
+            .map((line) => (line.startsWith('//') ? line : `// ${line}`))
+            .join('\n');
+          ctx.replaceSelectionText(comment);
+          ctx.close();
+        });
+        div.appendChild(button);
+        return div;
+      },
+      onChange: (file, lineAnnotations) => {
+        console.log('change', file, lineAnnotations);
+      },
+      onAttach: (editor) => {
+        const { selections } = editor.getState();
+        if (selections === undefined || selections.length === 0) {
+          editor.setSelections([
+            {
+              start: {
+                line: 0,
+                character: 1000, // will be normalized to the end of the line(< 1000 chars)
+              },
+              end: {
+                line: 0,
+                character: 1000, // will be normalized to the end of the line(< 1000 chars)
+              },
+              direction: 'none',
+            },
+          ]);
+          editor.setMarkers([
+            {
+              start: {
+                line: 1,
+                character: 2,
+              },
+              end: {
+                line: 1,
+                character: 1000, // will be normalized to the end of the line(< 1000 chars)
+              },
+              severity: 'info',
+              message: {
+                html: markerMessage({
+                  icon: MARKER_INFO_ICON,
+                  message: '<code>CodeOptionsMultipleThemes</code>',
+                  description: 'Code options of multiple themes.',
+                }),
+              },
+            },
+            {
+              start: {
+                line: 2,
+                character: 2,
+              },
+              end: {
+                line: 2,
+                character: 1000, // will be normalized to the end of the line(< 1000 chars)
+              },
+              severity: 'warning',
+              message: {
+                html: markerMessage({
+                  icon: MARKER_WARNING_ICON,
+                  message: '<code>CodeToHastOptions</code>',
+                  description: 'Code to Hast Options is deprecated.',
+                }),
+              },
+            },
+            {
+              start: {
+                line: 3,
+                character: 2,
+              },
+              end: {
+                line: 3,
+                character: 1000, // will be normalized to the end of the line(< 1000 chars)
+              },
+              severity: 'error',
+              message: {
+                html: markerMessage({
+                  icon: MARKER_ERROR_ICON,
+                  message: '<code>DecorationItem</code>',
+                  description: 'Type not defined.',
+                }),
+              },
+            },
+          ]);
+        }
+      },
+      __debug: true,
+    });
+    Object.assign(window, { editor });
     const fileContainer = document.createElement(DIFFS_TAG_NAME);
     wrapper.appendChild(fileContainer);
+    let isEditing = false;
     const options: FileOptions<LineCommentMetadata> = {
       overflow: wrap ? 'wrap' : 'scroll',
       theme: DEMO_THEME,
       themeType: getThemeType(),
       renderAnnotation,
+      ...(RENDER_FILENAME_SUFFIX
+        ? {
+            renderHeaderFilenameSuffix() {
+              return createHeaderFilenameSuffixBadge('File slot');
+            },
+          }
+        : null),
       renderHeaderMetadata() {
-        return createCollapsedToggle(
+        const collapsedToggle = createToggle(
+          'Collapse',
           instance?.options.collapsed ?? false,
           (checked) => {
             instance?.setOptions({
@@ -764,6 +1086,29 @@ if (renderFileButton != null) {
             }
           }
         );
+        const editableToggle = createToggle(
+          'Editable',
+          isEditing,
+          (checked) => {
+            isEditing = checked;
+            if (isEditing) {
+              editor.edit(instance);
+            } else {
+              editor.cleanUp();
+            }
+          }
+        );
+        editShortcutCallback = (): boolean | void => {
+          if (!isEditing) {
+            editableToggle.querySelector('input')?.click();
+            return false;
+          }
+        };
+        const div = document.createElement('div');
+        div.style.display = 'flex';
+        div.style.gap = '8px';
+        div.append(collapsedToggle, editableToggle);
+        return div;
       },
 
       // Line selection stuff
@@ -869,7 +1214,7 @@ if (renderFileButton != null) {
 
 const renderFileConflictButton = document.getElementById('render-conflict');
 if (renderFileConflictButton != null) {
-  // oxlint-disable-next-line @typescript-oxlint/no-misused-promises
+  // oxlint-disable-next-line typescript/no-misused-promises
   renderFileConflictButton.addEventListener('click', async () => {
     const wrapper = document.getElementById('wrapper');
     if (wrapper == null) {
@@ -885,6 +1230,13 @@ if (renderFileConflictButton != null) {
         themeType: getThemeType(),
         overflow: wrap ? 'wrap' : 'scroll',
         renderAnnotation,
+        ...(RENDER_FILENAME_SUFFIX
+          ? {
+              renderHeaderFilenameSuffix() {
+                return createHeaderFilenameSuffixBadge('Conflict slot');
+              },
+            }
+          : null),
         enableLineSelection: true,
         enableGutterUtility: true,
         maxContextLines: 4,
@@ -953,7 +1305,34 @@ cleanButton?.addEventListener('click', () => {
   cleanupInstances(container);
 });
 
-function createCollapsedToggle(
+const lagRadarCheckbox = document.getElementById('lag-radar');
+const radar = document.getElementById('radar');
+if (lagRadarCheckbox != null && radar != null) {
+  const { default: lagRadar } =
+    // @ts-expect-error dynamic import
+    await import('https://mobz.github.io/lag-radar/lag-radar.js');
+  let dispose: (() => void) | undefined;
+  lagRadarCheckbox.addEventListener('change', () => {
+    if (
+      lagRadarCheckbox instanceof HTMLInputElement &&
+      lagRadarCheckbox.checked
+    ) {
+      dispose = lagRadar({
+        parent: radar,
+        size: 100,
+        frames: 60,
+      });
+      radar.style.display = 'block';
+    } else {
+      dispose?.();
+      dispose = undefined;
+      radar.style.display = 'none';
+    }
+  });
+}
+
+function createToggle(
+  labelText: string,
   checked: boolean,
   onChange: (checked: boolean) => void
 ): HTMLElement {
@@ -966,7 +1345,7 @@ function createCollapsedToggle(
   });
   label.dataset.collapser = '';
   label.appendChild(input);
-  label.append(' Collapse');
+  label.appendChild(document.createTextNode(` ${labelText}`));
   return label;
 }
 

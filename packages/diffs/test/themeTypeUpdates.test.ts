@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, describe, expect, test } from 'bun:test';
 
 import {
   CodeView,
@@ -15,6 +15,10 @@ import {
   VirtualizedFileDiff,
 } from '../src';
 import { createRoot, installDom, wait } from './domHarness';
+
+afterAll(async () => {
+  await disposeHighlighter();
+});
 
 function makeFile(name: string): FileContents {
   return {
@@ -74,7 +78,9 @@ async function waitForThemeScheme(
   scheme: 'light' | 'dark'
 ): Promise<HTMLStyleElement> {
   const expected = `color-scheme: ${scheme};`;
-  for (let attempt = 0; attempt < 50; attempt++) {
+  // ~4s budget: returns as soon as the style lands, so passing runs only pay
+  // a few iterations; the headroom is for loaded CI runners.
+  for (let attempt = 0; attempt < 400; attempt++) {
     const style = element.shadowRoot?.querySelector<HTMLStyleElement>(
       'style[data-theme-css]'
     );
@@ -142,7 +148,6 @@ describe('themeType updates', () => {
       viewer.cleanUp();
       await wait(0);
       cleanup();
-      await disposeHighlighter();
     }
   });
 
@@ -177,7 +182,6 @@ describe('themeType updates', () => {
     } finally {
       instance?.cleanUp();
       cleanup();
-      await disposeHighlighter();
     }
   });
 
@@ -212,7 +216,6 @@ describe('themeType updates', () => {
     } finally {
       instance?.cleanUp();
       cleanup();
-      await disposeHighlighter();
     }
   });
 
@@ -271,7 +274,6 @@ describe('themeType updates', () => {
     } finally {
       instance?.cleanUp();
       cleanup();
-      await disposeHighlighter();
     }
   });
 
@@ -315,7 +317,6 @@ describe('themeType updates', () => {
     } finally {
       instance?.cleanUp();
       cleanup();
-      await disposeHighlighter();
     }
   });
 });

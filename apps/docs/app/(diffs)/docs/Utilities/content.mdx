@@ -5,6 +5,15 @@
   framework or rendering approach.
 </Notice>
 
+### Annotation type guards [toc-ignore]
+
+Use `isDiffAnnotation` and `isFileAnnotation` to tell diff annotations from file
+annotations. Use `isDiffAnnotationCollection` and `isFileAnnotationCollection`
+for arrays.
+
+Both collection helpers return `true` for an empty array. Use the current file
+or diff context if that distinction matters.
+
 ### diffAcceptRejectHunk [toc-ignore]
 
 Programmatically accept or reject individual hunks (or specific change blocks
@@ -66,9 +75,14 @@ all components. Useful for custom highlighting operations.
 
 ### parseDiffFromFile [toc-ignore]
 
-Compare two versions of a file and generate a `FileDiffMetadata` structure. Use
-this when you have the full contents of both file versions rather than a patch
-string.
+Compare file contents and generate a `FileDiffMetadata` structure. Use this when
+you have full file contents rather than a patch string. Pass both `oldFile` and
+`newFile` for changed files, `oldFile: null` for added files, or `newFile: null`
+for deleted files.
+
+`null` means that file side intentionally does not exist. Empty files should use
+`contents: ''`, not `null`. Passing `null` for both sides throws because there
+is no file to diff.
 
 If both `oldFile` and `newFile` have a `cacheKey`, the resulting
 `FileDiffMetadata` will automatically receive a combined cache key (format:

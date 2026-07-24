@@ -24,6 +24,10 @@ CodeView to avoid handling scaling yourself.
 - `scrollTo` APIs for items, line targets, and raw scroll positions.
 - Unified selection API, support for custom annotations, custom headers, and
   gutter utilities across the entire viewer.
+- Optional per-item [edit mode](#edit-mode-codeview) for files and diffs.
+- Optional non-virtualized [header and footer regions](#codeview-header-footer)
+  rendered inside the scroll container — ideal for PR summary cards and approval
+  bars.
 
 ### Core Model
 
@@ -45,9 +49,76 @@ immutability or deep equality checks, which can quickly become expensive.
   shown. You'll have to wire up your own custom header or utilities if you want
   to control it interactively. Remember to update `version` when this value
   changes.
+- The `edit` property enables [edit mode](#edit-mode-codeview) for an item when
+  React `CodeView` has an `EditProvider`, or vanilla `CodeView` has a
+  `createEditor` option. Update `version` when toggling it.
 - CodeView-level options such as `layout`, `itemMetrics`, `stickyHeaders`,
   `pointerEventsOnScroll`, and `smoothScrollSettings` allow you to configure the
   scroll view. All other options are shared between all files and diffs.
+- `loadDiffFiles` is one of those shared diff options. It applies to diff items
+  rendered inside `CodeView`, which is useful for large patch-driven review UIs
+  where full file contents should be fetched only when users expand unchanged
+  context. Hydration updates the existing `fileDiff` object in place, so keep
+  its identity stable when the hydrated metadata should persist across later
+  renders.
+
+### Editing
+
+React `CodeView` gets its editor factory from the nearest `EditProvider`; unlike
+vanilla `CodeView`, it does not accept `createEditor` directly or inside
+`options`. Keep the provider mounted, set `edit: true` on the items that should
+be editable, and pass creation-time item-editor behavior through
+`editorOptions`. `onItemEditChange` reports live contents with the owning item.
+If a session produces a change, `onItemEditComplete` reports its latest contents
+when editing is disabled or the item is collapsed or removed. Direct reset,
+cleanup, and viewer unmount are silent.
+
+Each edited item receives an independent editor whose history survives
+virtualization. Changes to the provider factory or `editorOptions` do not
+disturb active sessions; their latest values apply the next time an item enters
+edit mode.
+
+For vanilla `CodeView`, keep using `CodeViewOptions.createEditor`. It exposes
+the same item-aware callbacks, and CodeView owns each returned editor's
+lifecycle.
+
+#### Autofocus on Attach
+
+Autofocus is opt-in per edit session. In React, pass a stable `editorOptions`
+object whose `onAttach` callback targets the first editable row with a visible
+top edge:
+
+```tsx
+const editorOptions: EditorOptions<ThreadMetadata> = {
+  onAttach(editor) {
+    editor.focus({ lineNumber: 'first-visible', preventScroll: true });
+  },
+};
+
+<CodeView items={items} editorOptions={editorOptions} />;
+```
+
+For vanilla `CodeView`, add the callback while constructing each item editor:
+
+```ts
+const viewer = new CodeView({
+  createEditor(options) {
+    return new Editor({
+      ...options,
+      onAttach(editor) {
+        editor.focus({ lineNumber: 'first-visible', preventScroll: true });
+      },
+    });
+  },
+});
+```
+
+`preventScroll: true` preserves the viewer's scroll position. `CodeView` keeps
+the editor alive while an item is recycled, so the callback does not steal focus
+again when that item re-enters the virtualized window. If several items start an
+autofocusing edit session together, the last callback to run owns focus. See
+[Autofocus on Attach](#edit-mode-autofocus-on-attach) for explicit line targets,
+viewport fallback, offsets, and selection-state behavior.
 
 ### Padding &amp; Gap
 
@@ -56,6 +127,40 @@ For controlling layout inside and between items in `CodeView`, you can use the
 and adjust the layout. You should not apply these values with CSS yourself.
 
 <DocsCodeExample {...codeViewLayoutOptionsExample} />
+
+### Header &amp; Footer
+
+Use the `renderCodeViewHeader` and `renderCodeViewFooter` options to render your
+own element at the start and end of the scroll content; before the first item
+and after the last one.
+
+- Headers and footers are not virtualized. Unlike items, they are always in the
+  DOM while the viewer is mounted.
+- They are rendered inside the scroll container, as part of the scrollable
+  content. `CodeView` doesn't apply any positioning of its own, and they don't
+  affect `stickyHeaders` behavior for item headers.
+- You never declare a height. `CodeView` measures the element on mount and
+  tracks later size changes with a `ResizeObserver`, so async content, font
+  loads, and late-arriving React portals stay coherent, and scroll position is
+  re-anchored when a header's height changes.
+- Both render even when the item list is empty, which makes them useful for
+  loading or empty states in review UIs.
+- In React, return plain JSX from the `renderCodeViewHeader` /
+  `renderCodeViewFooter` props. The node is portaled into a host element the
+  viewer manages, so state-driven updates just work. Memoize the callbacks with
+  `useCallback` (listing any state they read as deps) so the header and footer
+  don't re-render on every parent render (don't trust React Compiler).
+- In Vanilla JS, return the same element across calls and mutate it in place to
+  update; returning `undefined` empties the host. The callback's presence
+  controls whether the host element exists at all.
+- The host elements carry `data-diffs-code-view-header` and
+  `data-diffs-code-view-footer` attributes for styling, and are exposed via
+  `getHeaderElement()` / `getFooterElement()` on the instance.
+
+<CodeViewExampleTabs
+  reactExample={codeViewHeaderFooterReactExample}
+  vanillaExample={codeViewHeaderFooterVanillaExample}
+/>
 
 ### File &amp; Diff Size Estimation
 
@@ -91,6 +196,33 @@ through React would be expensive. In imperative mode, omit `items`, optionally
 seed the viewer with `initialItems`, and use the `CodeViewHandle` to add new
 items or update existing ones.
 
+### Editing Item Annotations
+
+When an editable item has annotations, `onItemEditChange` receives the owning
+item, its edited `FileContents`, and the complete current annotation collection.
+For a diff item, those contents represent the editable new-file side. When the
+emitted annotation array is a different object, replace `item.annotations` and
+increment the item's `version`. `CodeView` does not write either value for you.
+
+The callback annotation type is `LineAnnotation[] | DiffLineAnnotation[]`: file
+items emit the side-less shape and diff items emit annotations with a `side`.
+Use `isFileAnnotationCollection` or `isDiffAnnotationCollection` to narrow it
+before reading shape-specific fields.
+
+When React owns the `CodeView` item list through `items`, publish a new `items`
+array containing the updated item inside `flushSync` so annotation placement
+updates with the edited content before paint. When `CodeView` owns the list in
+React's imperative mode, call `updateItem` through the component ref; in vanilla
+JS, call `updateItem` on the `CodeView` instance. Skip the update when the
+emitted array is the same object as the item's current annotations, since
+ordinary same-line typing reuses that array.
+
+Keep `onItemEditComplete` focused on committing the final `file` contents or
+rebuilding `fileDiff` with a fresh `cacheKey`. Live annotations should already
+be synchronized through `onItemEditChange`. See
+[Editing with line annotations](#edit-mode-editing-with-line-annotations) for
+remapping rules, stable metadata IDs, and annotation-content lifetime guidance.
+
 ### Usage Notes
 
 - In React, pass `items` for controlled item ownership.
@@ -103,9 +235,9 @@ items or update existing ones.
   to live in component state.
 - In React, use the ref for `scrollTo`, `setSelectedLines`, `getSelectedLines`,
   `clearSelectedLines`, `getItem`, `updateItem`, `addItems`, and `getInstance`.
-- `renderCustomHeader`, `renderHeaderPrefix`, `renderHeaderMetadata`,
-  `renderAnnotation`, and `renderGutterUtility` receive the whole
-  `CodeViewItem`, which makes it easy to branch on `item.type`.
+- `renderCustomHeader`, `renderHeaderPrefix`, `renderHeaderFilenameSuffix`,
+  `renderHeaderMetadata`, `renderAnnotation`, and `renderGutterUtility` receive
+  the whole `CodeViewItem`, which makes it easy to branch on `item.type`.
 - In Vanilla JS, `CodeView` owns a scrollable root that you set up once and
   update over time.
 - In Vanilla JS, call `setup(root)` once with the scrollable container.

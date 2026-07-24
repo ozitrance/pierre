@@ -58,6 +58,7 @@ import type {
   FileTreeSearchSessionHandle,
   FileTreeSelectionChangeListener,
   FileTreeSsrPayload,
+  FileTreeVisibleRow,
   FileTreeViewMode,
 } from '../model/publicTypes';
 import {
@@ -326,6 +327,21 @@ export class FileTree
     return this.#controller.getFocusedPath();
   }
 
+  public getFocusedIndex(): number {
+    return this.#controller.getFocusedIndex();
+  }
+
+  public getVisibleCount(): number {
+    return this.#controller.getVisibleCount();
+  }
+
+  public getVisibleRows(
+    start: number,
+    end: number
+  ): readonly FileTreeVisibleRow[] {
+    return this.#controller.getVisibleRows(start, end);
+  }
+
   public getSelectedPaths(): readonly string[] {
     return this.#controller.getSelectedPaths();
   }
@@ -360,6 +376,26 @@ export class FileTree
 
   public focusPath(path: string): void {
     this.#controller.focusPath(path);
+  }
+
+  public focusFirstItem(): void {
+    this.#controller.focusFirstItem();
+  }
+
+  public focusLastItem(): void {
+    this.#controller.focusLastItem();
+  }
+
+  public focusNextItem(): void {
+    this.#controller.focusNextItem();
+  }
+
+  public focusPreviousItem(): void {
+    this.#controller.focusPreviousItem();
+  }
+
+  public focusParentItem(): void {
+    this.#controller.focusParentItem();
   }
 
   public scrollToPath(

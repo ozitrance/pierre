@@ -3,7 +3,7 @@
 import { useMemo } from 'react';
 
 import { DIFFS_TAG_NAME } from '../constants';
-import type { FileContents } from '../types';
+import type { DiffFileInput, FileContents } from '../types';
 import { parseDiffFromFile } from '../utils/parseDiffFromFile';
 import type { DiffBasePropsReact } from './types';
 import { renderDiffChildren } from './utils/renderDiffChildren';
@@ -12,18 +12,20 @@ import { useFileDiffInstance } from './utils/useFileDiffInstance';
 
 export type { FileContents };
 
-export interface MultiFileDiffProps<
+interface MultiFileDiffBaseProps<
   LAnnotation,
 > extends DiffBasePropsReact<LAnnotation> {
-  oldFile: FileContents;
-  newFile: FileContents;
   disableWorkerPool?: boolean;
 }
+
+export type MultiFileDiffProps<LAnnotation> =
+  MultiFileDiffBaseProps<LAnnotation> & DiffFileInput;
 
 export function MultiFileDiff<LAnnotation = undefined>({
   oldFile,
   newFile,
   options,
+  editorOptions,
   metrics,
   lineAnnotations,
   selectedLines,
@@ -33,9 +35,11 @@ export function MultiFileDiff<LAnnotation = undefined>({
   renderAnnotation,
   renderCustomHeader,
   renderHeaderPrefix,
+  renderHeaderFilenameSuffix,
   renderHeaderMetadata,
   renderGutterUtility,
   disableWorkerPool = false,
+  edit = false,
 }: MultiFileDiffProps<LAnnotation>): React.JSX.Element {
   const fileDiff = useMemo(() => {
     return parseDiffFromFile(oldFile, newFile, options?.parseDiffOptions);
@@ -43,6 +47,7 @@ export function MultiFileDiff<LAnnotation = undefined>({
   const { ref, getHoveredLine } = useFileDiffInstance({
     fileDiff,
     options,
+    editorOptions,
     metrics,
     lineAnnotations,
     selectedLines,
@@ -50,11 +55,13 @@ export function MultiFileDiff<LAnnotation = undefined>({
     hasGutterRenderUtility: renderGutterUtility != null,
     hasCustomHeader: renderCustomHeader != null,
     disableWorkerPool,
+    edit,
   });
   const children = renderDiffChildren({
     fileDiff,
     renderCustomHeader,
     renderHeaderPrefix,
+    renderHeaderFilenameSuffix,
     renderHeaderMetadata,
     renderAnnotation,
     lineAnnotations,

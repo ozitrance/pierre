@@ -20,6 +20,7 @@ export interface PatchDiffProps<
 export function PatchDiff<LAnnotation = undefined>({
   patch,
   options,
+  editorOptions,
   metrics,
   lineAnnotations,
   selectedLines,
@@ -29,14 +30,17 @@ export function PatchDiff<LAnnotation = undefined>({
   renderAnnotation,
   renderCustomHeader,
   renderHeaderPrefix,
+  renderHeaderFilenameSuffix,
   renderHeaderMetadata,
   renderGutterUtility,
   disableWorkerPool = false,
+  edit = false,
 }: PatchDiffProps<LAnnotation>): React.JSX.Element {
   const fileDiff = usePatch(patch);
   const { ref, getHoveredLine } = useFileDiffInstance({
     fileDiff,
     options,
+    editorOptions,
     metrics,
     lineAnnotations,
     selectedLines,
@@ -44,11 +48,13 @@ export function PatchDiff<LAnnotation = undefined>({
     hasGutterRenderUtility: renderGutterUtility != null,
     hasCustomHeader: renderCustomHeader != null,
     disableWorkerPool,
+    edit,
   });
   const children = renderDiffChildren({
     fileDiff,
     renderCustomHeader,
     renderHeaderPrefix,
+    renderHeaderFilenameSuffix,
     renderHeaderMetadata,
     renderAnnotation,
     lineAnnotations,

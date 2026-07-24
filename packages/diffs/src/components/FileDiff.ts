@@ -3,10 +3,12 @@ import { toHtml } from 'hast-util-to-html';
 
 import {
   CUSTOM_HEADER_SLOT_ID,
+  DEFAULT_COLLAPSED_CONTEXT_THRESHOLD,
   DEFAULT_THEMES,
   DEFAULT_TOKENIZE_MAX_LENGTH,
   DIFFS_TAG_NAME,
   EMPTY_RENDER_RANGE,
+  HEADER_FILENAME_SUFFIX_SLOT_ID,
   HEADER_METADATA_SLOT_ID,
   HEADER_PREFIX_SLOT_ID,
   THEME_CSS_ATTRIBUTE,
@@ -23,6 +25,10 @@ import {
 import { ResizeManager } from '../managers/ResizeManager';
 import { ScrollSyncManager } from '../managers/ScrollSyncManager';
 import {
+  dequeueRender,
+  queueRender,
+} from '../managers/UniversalRenderingManager';
+import {
   DiffHunksRenderer,
   type DiffHunksRendererOptions,
   type HunksRenderResult,
@@ -33,13 +39,20 @@ import type {
   BaseDiffOptions,
   CustomPreProperties,
   DiffLineAnnotation,
+  DiffsEditableComponent,
+  DiffsEditor,
+  DiffsTextDocument,
+  EditorActiveLineOptions,
   ExpansionDirections,
   FileContents,
   FileDiffMetadata,
+  HighlightedToken,
   HunkData,
   HunkSeparators,
+  MaybeDiffFileInput,
   PostRenderPhase,
   PrePropertiesConfig,
+  RenderHeaderFilenameSuffixCallback,
   RenderHeaderMetadataCallback,
   RenderHeaderPrefixCallback,
   RenderRange,
@@ -53,6 +66,7 @@ import { areHunkDataEqual } from '../utils/areHunkDataEqual';
 import { arePrePropertiesEqual } from '../utils/arePrePropertiesEqual';
 import { areRenderRangesEqual } from '../utils/areRenderRangesEqual';
 import { areThemesEqual } from '../utils/areThemesEqual';
+import { awaitWithTimeout } from '../utils/awaitWithTimeout';
 import { createAnnotationWrapperNode } from '../utils/createAnnotationWrapperNode';
 import { createGutterUtilityContentNode } from '../utils/createGutterUtilityContentNode';
 import { createUnsafeCSSStyleNode } from '../utils/createUnsafeCSSStyleNode';
@@ -61,23 +75,61 @@ import {
   wrapThemeCSS,
   wrapUnsafeCSS,
 } from '../utils/cssWrappers';
+import {
+  captureExpansionAnchors,
+  finishEditSessionForDiff,
+  rebuildExpansionFromAnchors,
+} from '../utils/editSessionHunks';
+import { getDiffFileInput } from '../utils/getDiffFileInput';
 import { getDiffHunksRendererOptions } from '../utils/getDiffHunksRendererOptions';
+import { getHunkSideStartBoundary } from '../utils/getHunkSideBoundaries';
 import { getLineAnnotationName } from '../utils/getLineAnnotationName';
 import { getOrCreateCodeNode } from '../utils/getOrCreateCodeNode';
 import { upsertHostThemeStyle } from '../utils/hostTheme';
+import { hydratePartialDiff } from '../utils/hydratePartialDiff';
+import { isDefaultRenderRange } from '../utils/isDefaultRenderRange';
 import { isDiffPlainText } from '../utils/isDiffPlainText';
 import { isStyleNode } from '../utils/isStyleNode';
+import { iterateOverDiff } from '../utils/iterateOverDiff';
 import { parseDiffFromFile } from '../utils/parseDiffFromFile';
 import { prerenderHTMLIfNecessary } from '../utils/prerenderHTMLIfNecessary';
 import { getMeasuredScrollbarGutter } from '../utils/scrollbarGutter';
 import { setPreNodeProperties } from '../utils/setWrapperNodeProps';
+import {
+  getExpandedRegion,
+  getHunkAdditionLineRange,
+  getNearestRenderableAdditionLine,
+  getTrailingExpandedRegion,
+  isAdditionLineRenderable,
+} from '../utils/virtualDiffLayout';
 import type { WorkerPoolManager } from '../worker';
 import { DiffsContainerLoaded } from './web-components';
 
-export interface FileDiffRenderProps<LAnnotation> {
+type LoadedPartialDiffContents = Awaited<
+  ReturnType<NonNullable<BaseDiffOptions['loadDiffFiles']>>
+>;
+
+type DeferredSelectedLinesWrite = [
+  range: SelectedLineRange | null,
+  options: SelectionWriteOptions | undefined,
+];
+
+type DeferredEditorActiveLineWrite = [
+  lineNumber: number | null,
+  options: EditorActiveLineOptions | undefined,
+];
+
+function canHydrateDiff(fileDiff: FileDiffMetadata): boolean {
+  return (
+    fileDiff.isPartial &&
+    (fileDiff.type === 'change' ||
+      fileDiff.type === 'rename-changed' ||
+      fileDiff.type === 'rename-pure')
+  );
+}
+
+export interface FileDiffRenderBaseProps<LAnnotation> {
   fileDiff?: FileDiffMetadata;
-  oldFile?: FileContents;
-  newFile?: FileContents;
   deferManagers?: boolean;
   forceRender?: boolean;
   preventEmit?: boolean;
@@ -87,13 +139,17 @@ export interface FileDiffRenderProps<LAnnotation> {
   renderRange?: RenderRange;
 }
 
-export interface FileDiffHydrationProps<LAnnotation> extends Omit<
-  FileDiffRenderProps<LAnnotation>,
+export type FileDiffRenderProps<LAnnotation> =
+  FileDiffRenderBaseProps<LAnnotation> & MaybeDiffFileInput;
+
+export type FileDiffHydrationProps<LAnnotation> = Omit<
+  FileDiffRenderBaseProps<LAnnotation>,
   'fileContainer'
-> {
-  fileContainer: HTMLElement;
-  prerenderedHTML?: string;
-}
+> &
+  MaybeDiffFileInput & {
+    fileContainer: HTMLElement;
+    prerenderedHTML?: string;
+  };
 
 export type FileDiffType = 'file-diff' | 'unresolved-file';
 
@@ -112,6 +168,7 @@ export interface FileDiffOptions<LAnnotation>
       ) => HTMLElement | DocumentFragment | null | undefined);
   disableFileHeader?: boolean;
   renderHeaderPrefix?: RenderHeaderPrefixCallback;
+  renderHeaderFilenameSuffix?: RenderHeaderFilenameSuffixCallback;
   renderHeaderMetadata?: RenderHeaderMetadataCallback;
   renderCustomHeader?: RenderHeaderMetadataCallback;
   /**
@@ -166,16 +223,21 @@ interface ApplyPartialRenderProps {
   renderRange: RenderRange | undefined;
 }
 
-interface HydrationSetup<LAnnotation> {
+interface PendingFileLoad {
+  fileDiff: FileDiffMetadata;
+  promise: Promise<void>;
+}
+
+type HydrationSetup<LAnnotation> = {
   fileDiff: FileDiffMetadata | undefined;
   lineAnnotations: DiffLineAnnotation<LAnnotation>[] | undefined;
-  oldFile?: FileContents;
-  newFile?: FileContents;
-}
+} & MaybeDiffFileInput;
 
 let instanceId = -1;
 
-export class FileDiff<LAnnotation = undefined> {
+export class FileDiff<
+  LAnnotation = undefined,
+> implements DiffsEditableComponent<LAnnotation> {
   // NOTE(amadeus): We sorta need this to ensure the web-component file is
   // properly loaded
   static LoadedCustomComponent: boolean = DiffsContainerLoaded;
@@ -200,6 +262,7 @@ export class FileDiff<LAnnotation = undefined> {
 
   protected headerElement: HTMLElement | undefined;
   protected headerPrefix: HTMLElement | undefined;
+  protected headerFilenameSuffix: HTMLElement | undefined;
   protected headerMetadata: HTMLElement | undefined;
   protected headerCustom: HTMLElement | undefined;
   protected separatorCache: Map<string, CustomHunkElementCache> = new Map();
@@ -216,10 +279,11 @@ export class FileDiff<LAnnotation = undefined> {
   protected lineAnnotations: DiffLineAnnotation<LAnnotation>[] = [];
   protected managersDirty = false;
 
-  protected deletionFile: FileContents | undefined;
-  protected additionFile: FileContents | undefined;
+  protected deletionFile?: FileContents | null;
+  protected additionFile?: FileContents | null;
   public fileDiff: FileDiffMetadata | undefined;
   protected renderRange: RenderRange | undefined;
+  protected pendingFiles: PendingFileLoad | undefined;
   protected appliedPreAttributes: PrePropertiesConfig | undefined;
   protected lastRenderedHeaderHTML: string | undefined;
   protected cachedHeaderHTML: string | undefined;
@@ -227,6 +291,15 @@ export class FileDiff<LAnnotation = undefined> {
   private mounted = false;
 
   protected enabled = true;
+
+  protected editor: DiffsEditor<LAnnotation> | undefined;
+  protected refreshViewTimeout: ReturnType<typeof setTimeout> | undefined;
+  // Defer selected-line and editor active-line writes while a refresh rebuilds
+  // the diff rows. This is separate from the timeout because the refresh can
+  // escalate to a full rerender without one.
+  protected lineStateRefreshPending = false;
+  protected deferredSelectedLines: DeferredSelectedLinesWrite | undefined;
+  protected deferredEditorActiveLine: DeferredEditorActiveLineWrite | undefined;
 
   constructor(
     public options: FileDiffOptions<LAnnotation> = { theme: DEFAULT_THEMES },
@@ -276,17 +349,22 @@ export class FileDiff<LAnnotation = undefined> {
     lineNumber: number,
     side: SelectionSide = 'additions'
   ) => {
-    if (this.fileDiff == null) {
+    // use the fileDiff from the hunksRenderer if it exists, it maybe updated
+    // by the host
+    const fileDiff = this.fileDiffCache;
+    if (fileDiff == null) {
       return undefined;
     }
-    const lastHunk = this.fileDiff.hunks.at(-1);
+    const lastHunk = fileDiff.hunks.at(-1);
     let targetUnifiedIndex: number | undefined;
     let targetSplitIndex: number | undefined;
-    hunkIterator: for (const hunk of this.fileDiff.hunks) {
-      let currentLineNumber =
+    hunkIterator: for (const hunk of fileDiff.hunks) {
+      const hunkStart =
         side === 'deletions' ? hunk.deletionStart : hunk.additionStart;
       const hunkCount =
         side === 'deletions' ? hunk.deletionCount : hunk.additionCount;
+      let currentLineNumber =
+        getHunkSideStartBoundary(hunkStart, hunkCount) + 1;
       let splitIndex = hunk.splitLineStart;
       let unifiedIndex = hunk.unifiedLineStart;
 
@@ -453,7 +531,44 @@ export class FileDiff<LAnnotation = undefined> {
     range: SelectedLineRange | null,
     options?: SelectionWriteOptions
   ): void {
-    this.interactionManager.setSelection(range, options);
+    if (this.lineStateRefreshPending) {
+      this.deferredSelectedLines = [range, options];
+    } else {
+      this.interactionManager.setSelection(range, options);
+    }
+  }
+
+  public setEditorActiveLine(
+    lineNumber: number | null,
+    options?: EditorActiveLineOptions
+  ): void {
+    if (this.lineStateRefreshPending) {
+      this.deferredEditorActiveLine = [lineNumber, options];
+    } else {
+      this.interactionManager.setEditorActiveLine(lineNumber, {
+        lineNumberOnly: options?.lineNumberOnly,
+        side: options?.side ?? 'additions',
+      });
+    }
+  }
+
+  // A refresh can receive selected-lines and editor active-line writes in either
+  // order. Apply the latest value from each after the rows are stable.
+  protected flushDeferredLineState(): void {
+    const {
+      deferredEditorActiveLine: editorActiveLine,
+      deferredSelectedLines: selectedLines,
+    } = this;
+    this.lineStateRefreshPending = false;
+    this.deferredEditorActiveLine = undefined;
+    this.deferredSelectedLines = undefined;
+
+    if (editorActiveLine != null) {
+      this.setEditorActiveLine(...editorActiveLine);
+    }
+    if (selectedLines != null) {
+      this.interactionManager.setSelection(...selectedLines);
+    }
   }
 
   public flushManagers(): void {
@@ -464,7 +579,12 @@ export class FileDiff<LAnnotation = undefined> {
 
     const { diffStyle = 'split', overflow = 'scroll' } = this.options;
     this.interactionManager.setup(this.pre);
-    this.resizeManager.setup(this.pre, overflow === 'wrap');
+    this.resizeManager.setup(this.pre, {
+      disableAnnotations: overflow === 'wrap',
+      columnVariables: this.shouldApplyColumnVariables(overflow)
+        ? 'apply'
+        : 'measure',
+    });
     if (overflow === 'scroll' && diffStyle === 'split') {
       this.scrollSyncManager.setup(
         this.pre,
@@ -477,14 +597,50 @@ export class FileDiff<LAnnotation = undefined> {
     this.managersDirty = false;
   }
 
+  protected shouldApplyColumnVariables(overflow: 'scroll' | 'wrap'): boolean {
+    if (typeof this.options.hunkSeparators === 'function') {
+      return true;
+    }
+    return (
+      overflow === 'scroll' &&
+      (this.lineAnnotations.length > 0 ||
+        this.pre?.hasAttribute('data-has-merge-conflict') === true)
+    );
+  }
+
+  public getCodeScrollLeft(): number {
+    return Math.max(
+      this.codeUnified?.scrollLeft ?? 0,
+      this.codeDeletions?.scrollLeft ?? 0,
+      this.codeAdditions?.scrollLeft ?? 0
+    );
+  }
+
+  public setCodeScrollLeft(position: number): void {
+    if (this.codeUnified != null) {
+      this.codeUnified.scrollLeft = position;
+    }
+    if (this.codeAdditions != null) {
+      this.codeAdditions.scrollLeft = position;
+    }
+    if (this.codeDeletions != null) {
+      this.codeDeletions.scrollLeft = position;
+    }
+  }
+
   public cleanUp(recycle: boolean = false): void {
+    dequeueRender(this.handleEditSessionRender);
     this.emitPostRender(true);
+    // Persist editor state while the code scrollers still exist.
+    this.editor?.cleanUp(recycle);
+    this.editor = undefined;
     this.resizeManager.cleanUp();
     this.interactionManager.cleanUp();
     this.scrollSyncManager.cleanUp();
     this.managersDirty = false;
     this.workerManager?.unsubscribeToThemeChanges(this);
     this.renderRange = undefined;
+    this.pendingFiles = undefined;
 
     // Clean up the elements
     if (!this.isContainerManaged) {
@@ -501,18 +657,23 @@ export class FileDiff<LAnnotation = undefined> {
     this.codeUnified = undefined;
     this.codeDeletions = undefined;
     this.codeAdditions = undefined;
+    this.bufferBefore?.remove();
     this.bufferBefore = undefined;
+    this.bufferAfter?.remove();
     this.bufferAfter = undefined;
     this.appliedPreAttributes = undefined;
     this.headerElement = undefined;
     this.headerPrefix = undefined;
+    this.headerFilenameSuffix = undefined;
     this.headerMetadata = undefined;
     this.headerCustom = undefined;
+    this.placeHolder?.remove();
     this.placeHolder = undefined;
     this.lastRenderedHeaderHTML = undefined;
     if (!recycle) {
       this.cachedHeaderHTML = undefined;
     }
+    this.errorWrapper?.remove();
     this.errorWrapper = undefined;
     this.spriteSVG = undefined;
     this.lastRowCount = undefined;
@@ -533,6 +694,13 @@ export class FileDiff<LAnnotation = undefined> {
       this.additionFile = undefined;
     }
 
+    if (this.refreshViewTimeout != null) {
+      clearTimeout(this.refreshViewTimeout);
+      this.refreshViewTimeout = undefined;
+    }
+    this.lineStateRefreshPending = false;
+    this.deferredEditorActiveLine = undefined;
+    this.deferredSelectedLines = undefined;
     this.enabled = false;
   }
 
@@ -541,16 +709,27 @@ export class FileDiff<LAnnotation = undefined> {
     this.workerManager?.subscribeToThemeChanges(this);
   }
 
-  public hydrate(props: FileDiffHydrationProps<LAnnotation>): void {
-    const {
-      fileContainer,
-      prerenderedHTML,
-      preventEmit = false,
-      lineAnnotations,
-      oldFile,
-      newFile,
-      fileDiff,
-    } = props;
+  public hydrate({
+    fileContainer,
+    prerenderedHTML,
+    preventEmit = false,
+    lineAnnotations,
+    fileDiff,
+    ...fileInputProps
+  }: FileDiffHydrationProps<LAnnotation>): void {
+    if (!this.enabled) {
+      throw new Error(
+        'FileDiff.hydrate: attempting to call hydrate after cleaned up'
+      );
+    }
+    if (this.fileContainer != null) {
+      throw new Error(
+        'FileDiff.hydrate: hydrate can only be called before the instance has rendered or hydrated'
+      );
+    }
+    const fileInput = getDiffFileInput(fileInputProps, 'FileDiff.hydrate');
+    const oldFile = fileInput?.oldFile;
+    const newFile = fileInput?.newFile;
     this.hydrateElements(fileContainer, prerenderedHTML);
     if (
       shouldRenderCode(
@@ -564,15 +743,20 @@ export class FileDiff<LAnnotation = undefined> {
         this.options.disableFileHeader
       )
     ) {
-      this.render({ ...props, preventEmit: true });
+      this.render({
+        ...fileInputProps,
+        fileContainer,
+        lineAnnotations,
+        fileDiff,
+        preventEmit: true,
+      });
     }
     // Otherwise orchestrate our setup
     else {
       this.hydrationSetup({
         fileDiff,
-        oldFile,
-        newFile,
         lineAnnotations,
+        ...fileInput,
       });
     }
     if (!preventEmit) {
@@ -658,7 +842,7 @@ export class FileDiff<LAnnotation = undefined> {
     this.deletionFile = oldFile;
     this.fileDiff =
       fileDiff ??
-      (oldFile != null && newFile != null
+      (oldFile !== undefined && newFile !== undefined
         ? parseDiffFromFile(oldFile, newFile, this.options.parseDiffOptions)
         : undefined);
 
@@ -717,12 +901,77 @@ export class FileDiff<LAnnotation = undefined> {
       direction,
       expansionLineCountOverride
     );
+    this.loadFilesIfNecessary();
     this.rerender();
   };
 
+  protected loadFilesIfNecessary(): void {
+    const {
+      fileDiff,
+      options: { loadDiffFiles },
+    } = this;
+    if (
+      fileDiff == null ||
+      loadDiffFiles == null ||
+      !canHydrateDiff(fileDiff) ||
+      this.pendingFiles?.fileDiff === fileDiff
+    ) {
+      return;
+    }
+
+    this.pendingFiles = {
+      fileDiff,
+      promise: this.loadFilesForDiff(fileDiff, loadDiffFiles),
+    };
+  }
+
+  private async loadFilesForDiff(
+    fileDiff: FileDiffMetadata,
+    loadDiffFiles: NonNullable<BaseDiffOptions['loadDiffFiles']>
+  ): Promise<void> {
+    try {
+      const files = await loadDiffFiles(fileDiff);
+      if (!this.enabled || this.fileDiff !== fileDiff) {
+        return;
+      }
+
+      await this.handleFilesLoaded(fileDiff, files);
+    } catch (error: unknown) {
+      if (this.options.disableErrorHandling === true) {
+        throw error;
+      }
+      console.error(error);
+    } finally {
+      if (this.pendingFiles?.fileDiff === fileDiff) {
+        this.pendingFiles = undefined;
+      }
+    }
+  }
+
+  protected async handleFilesLoaded(
+    expectedDiff: FileDiffMetadata,
+    files: LoadedPartialDiffContents
+  ): Promise<void> {
+    if (this.fileDiff !== expectedDiff || !expectedDiff.isPartial) {
+      return;
+    }
+    hydratePartialDiff('merge', expectedDiff, files);
+    this.setHydratedState(files);
+    await awaitWithTimeout(() => this.primeHighlightCache(expectedDiff));
+    if (!this.enabled || this.fileDiff !== expectedDiff) {
+      return;
+    }
+    this.rerender();
+  }
+
+  protected setHydratedState(files: LoadedPartialDiffContents): void {
+    this.deletionFile = files.oldFile;
+    this.additionFile = files.newFile;
+    this.workerManager?.cleanUpTasks(this.hunksRenderer);
+    this.hunksRenderer.clearRenderCache();
+  }
+
   public render({
-    oldFile,
-    newFile,
     fileDiff,
     deferManagers = false,
     forceRender = false,
@@ -731,7 +980,11 @@ export class FileDiff<LAnnotation = undefined> {
     fileContainer,
     containerWrapper,
     renderRange,
+    ...fileInputProps
   }: FileDiffRenderProps<LAnnotation>): boolean {
+    const fileInput = getDiffFileInput(fileInputProps, 'FileDiff.render');
+    const oldFile = fileInput?.oldFile;
+    const newFile = fileInput?.newFile;
     if (!this.enabled) {
       // NOTE(amadeus): May need to be a silent failure? Making it loud for now
       // to better understand it
@@ -739,14 +992,31 @@ export class FileDiff<LAnnotation = undefined> {
         'FileDiff.render: attempting to call render after cleaned up'
       );
     }
-    const { collapsed = false, themeType = 'system' } = this.options;
+
+    // use the file name as the cache key if it is not set
+    if (fileDiff != null && fileDiff.cacheKey === undefined) {
+      fileDiff.cacheKey =
+        fileDiff.prevName != null
+          ? fileDiff.prevName + ':' + fileDiff.name
+          : fileDiff.name;
+    }
+
+    // postpone background tokenizing to next frame for avoiding UI freeze
+    // during render
+    this.editor?.__postponeBgTokenizeToNextFrame();
+
+    const {
+      collapsed = false,
+      themeType = 'system',
+      expandUnchanged = false,
+    } = this.options;
     const nextRenderRange = collapsed ? undefined : renderRange;
     const themeChanged = this.hasThemeChanged();
+    const hasFileInput = fileInput != null;
     const filesDidChange =
-      oldFile != null &&
-      newFile != null &&
-      (!areFilesEqual(oldFile, this.deletionFile) ||
-        !areFilesEqual(newFile, this.additionFile));
+      hasFileInput &&
+      (!areOptionalFilesEqual(oldFile, this.deletionFile) ||
+        !areOptionalFilesEqual(newFile, this.additionFile));
     let diffDidChange = fileDiff != null && fileDiff !== this.fileDiff;
     const annotationsChanged =
       lineAnnotations != null &&
@@ -770,6 +1040,19 @@ export class FileDiff<LAnnotation = undefined> {
       return this.applyCachedThemeState(themeType);
     }
 
+    let nextParsedFileDiff: FileDiffMetadata | undefined;
+    if (
+      fileDiff == null &&
+      hasFileInput &&
+      (filesDidChange || this.fileDiff == null)
+    ) {
+      nextParsedFileDiff = parseDiffFromFile(
+        fileInput.oldFile,
+        fileInput.newFile,
+        this.options.parseDiffOptions
+      );
+    }
+
     const { renderRange: previousRenderRange } = this;
     this.renderRange = nextRenderRange;
     this.deletionFile = oldFile;
@@ -777,13 +1060,9 @@ export class FileDiff<LAnnotation = undefined> {
 
     if (fileDiff != null) {
       this.fileDiff = fileDiff;
-    } else if (oldFile != null && newFile != null && filesDidChange) {
+    } else if (nextParsedFileDiff != null) {
       diffDidChange = true;
-      this.fileDiff = parseDiffFromFile(
-        oldFile,
-        newFile,
-        this.options.parseDiffOptions
-      );
+      this.fileDiff = nextParsedFileDiff;
     }
     if (diffDidChange) {
       this.cachedHeaderHTML = undefined;
@@ -794,6 +1073,19 @@ export class FileDiff<LAnnotation = undefined> {
     }
     if (this.fileDiff == null) {
       return false;
+    }
+    // Backstop for sessions that ended without their exit hook running (e.g.
+    // session-shaped metadata reused after a host teardown): restore
+    // recompute-shaped hunks before rendering.
+    if (
+      this.fileDiff.editSessionDirty === true &&
+      this.shouldSelfHealEditSession()
+    ) {
+      finishEditSessionForDiff(this.fileDiff, this.options.parseDiffOptions);
+      void this.hunksRenderer.refreshHighlightedResult();
+    }
+    if (expandUnchanged) {
+      this.loadFilesIfNecessary();
     }
     this.hunksRenderer.setOptions(this.getHunksRendererOptions(this.options));
     this.syncInteractionOptions();
@@ -907,7 +1199,6 @@ export class FileDiff<LAnnotation = undefined> {
         }
         this.renderSeparators(hunksResult.hunkData);
       }
-
       this.applyBuffers(pre, nextRenderRange);
       this.injectUnsafeCSS();
       this.renderAnnotations();
@@ -916,6 +1207,10 @@ export class FileDiff<LAnnotation = undefined> {
       this.managersDirty = true;
       if (!deferManagers) {
         this.flushManagers();
+      }
+
+      if (this.editor != null) {
+        this.syncRenderViewToEditor();
       }
     } catch (error: unknown) {
       if (disableErrorHandling) {
@@ -958,6 +1253,387 @@ export class FileDiff<LAnnotation = undefined> {
     this.mounted = true;
     onPostRender?.(fileContainer, this, phase);
   }
+
+  protected get fileDiffCache(): FileDiffMetadata | undefined {
+    return this.hunksRenderer.diffCache ?? this.fileDiff;
+  }
+
+  private syncRenderViewToEditor(): void {
+    const editor = this.editor;
+    const fileContainer = this.fileContainer;
+    const fileDiff = this.fileDiffCache;
+    const lineAnnotations = this.lineAnnotations;
+    const renderRange = this.computeEditorRenderRange(this.renderRange);
+    if (
+      editor != null &&
+      fileContainer != null &&
+      fileDiff != null &&
+      !fileDiff.isPartial
+    ) {
+      void this.hunksRenderer.initializeHighlighter().then((highlighter) => {
+        if (
+          !this.enabled ||
+          this.editor !== editor ||
+          this.fileContainer !== fileContainer ||
+          this.fileDiffCache !== fileDiff
+        ) {
+          return;
+        }
+        editor.__syncRenderView(
+          highlighter,
+          fileContainer,
+          fileDiff,
+          lineAnnotations,
+          renderRange
+        );
+      });
+    }
+  }
+
+  // The stored render range is in rendered-row units for the windowed AST
+  // pipeline, but the editor consumes render ranges in document-line units.
+  // Derive the addition-side document window covered by the rendered rows:
+  // startingLine = first addition line with a row in the window, totalLines =
+  // last such line - first + 1, and 0 when the window holds no addition rows
+  // (e.g. a pure-deletion run taller than the viewport).
+  private computeEditorRenderRange(
+    renderRange: RenderRange | undefined
+  ): RenderRange | undefined {
+    const fileDiff = this.fileDiffCache;
+    if (
+      renderRange == null ||
+      fileDiff == null ||
+      isDefaultRenderRange(renderRange)
+    ) {
+      return renderRange;
+    }
+    const {
+      diffStyle = 'split',
+      expandUnchanged = false,
+      collapsedContextThreshold = DEFAULT_COLLAPSED_CONTEXT_THRESHOLD,
+    } = this.options;
+    let firstLineNumber: number | undefined;
+    let lastLineNumber: number | undefined;
+    iterateOverDiff({
+      diff: fileDiff,
+      diffStyle,
+      startingLine: renderRange.startingLine,
+      totalLines: renderRange.totalLines,
+      expandedHunks: expandUnchanged
+        ? true
+        : this.hunksRenderer.getExpandedHunksMap(),
+      collapsedContextThreshold,
+      callback: ({ additionLine }) => {
+        if (additionLine != null) {
+          firstLineNumber ??= additionLine.lineNumber;
+          lastLineNumber = additionLine.lineNumber;
+        }
+      },
+    });
+    if (firstLineNumber == null || lastLineNumber == null) {
+      return { ...renderRange, startingLine: 0, totalLines: 0 };
+    }
+    return {
+      ...renderRange,
+      startingLine: firstLineNumber - 1,
+      totalLines: lastLineNumber - firstLineNumber + 1,
+    };
+  }
+
+  public attachEditor(
+    editor: DiffsEditor<LAnnotation>
+  ): (recycle?: boolean) => void {
+    // Editing is a plain file-diff concern only. Subclasses with their own
+    // hunk semantics (UnresolvedFile) are not editable, so an editor must
+    // never attach to them.
+    if (this.type !== 'file-diff') {
+      throw new Error(
+        `FileDiff.attachEditor: cannot attach an editor to a "${this.type}" diff`
+      );
+    }
+    this.editor?.cleanUp();
+    this.editor = editor;
+    this.hunksRenderer.beginEditSession();
+    // The editor sync below refuses partial diffs (it needs the full file
+    // contents); kick off hydration so the loaded re-render re-runs it.
+    if (this.fileDiff?.isPartial === true) {
+      this.loadFilesIfNecessary();
+    }
+    this.syncRenderViewToEditor();
+    return (recycle?: boolean) => {
+      this.editor = undefined;
+      // A recycle detach is a virtualized unmount mid-session: the session
+      // continues on remount, so hunks stay session-shaped. Only a genuine
+      // end runs the exit recompute.
+      if (recycle !== true) {
+        this.finishEditSession();
+      }
+    };
+  }
+
+  // Genuine session exit for the live detach path.
+  private finishEditSession(): void {
+    this.hunksRenderer.endEditSession();
+    this.completeEditSession();
+  }
+
+  /**
+   * Run the genuine session-end recompute: restore recompute-shaped hunks (a
+   * context-only region collapses away, boundaries re-derive), preserve
+   * expansion state best-effort via old-side anchors, and repaint through
+   * the session render path — which also invalidates virtualized layout,
+   * since nothing else does at exit now that editing does not flip
+   * expandUnchanged. Marker-guarded and idempotent; CodeView also calls this
+   * when reaping a session whose detach closure was consumed by a recycle.
+   * Safe on a cleaned-up instance: the recompute is pure metadata work and
+   * the deferred rerender is enabled-guarded. Returns true when a recompute
+   * ran.
+   */
+  public completeEditSession(): boolean {
+    const fileDiff = this.fileDiffCache;
+    if (fileDiff == null || fileDiff.editSessionDirty !== true) {
+      return false;
+    }
+    const { collapsedContextThreshold = DEFAULT_COLLAPSED_CONTEXT_THRESHOLD } =
+      this.options;
+    const anchors = captureExpansionAnchors(
+      fileDiff,
+      this.hunksRenderer.getExpandedHunksMap(),
+      collapsedContextThreshold
+    );
+    finishEditSessionForDiff(fileDiff, this.options.parseDiffOptions);
+    this.hunksRenderer.setExpandedHunksMap(
+      rebuildExpansionFromAnchors(fileDiff, anchors)
+    );
+    void this.hunksRenderer.refreshHighlightedResult();
+    this.escalateEditSessionRender();
+    return true;
+  }
+
+  // normally triggered by the host when the document line count changes
+  public applyDocumentChange(
+    textDocument: DiffsTextDocument,
+    newLineAnnotations?: DiffLineAnnotation<LAnnotation>[]
+  ): void {
+    this.hunksRenderer.applyDocumentChange(textDocument);
+    const fileDiff = this.hunksRenderer.diffCache;
+    if (fileDiff != null) {
+      const cacheKey = this.fileDiff?.cacheKey;
+      if (cacheKey != null && fileDiff.cacheKey == null) {
+        fileDiff.cacheKey = cacheKey;
+      }
+      this.fileDiff = fileDiff;
+    }
+    if (
+      newLineAnnotations !== undefined &&
+      newLineAnnotations !== this.lineAnnotations
+    ) {
+      this.setLineAnnotations(newLineAnnotations);
+      this.hunksRenderer.setLineAnnotations(this.lineAnnotations);
+      this.renderAnnotations();
+    }
+    this.rerender();
+    this.interactionManager.setSelectionDirty();
+  }
+
+  public updateRenderCache(
+    dirtyLines: Map<number, Array<HighlightedToken>>,
+    themeType: 'dark' | 'light',
+    shouldRefreshView: boolean,
+    lineCountChangeInFlight = false
+  ): void {
+    const regionsChanged = this.hunksRenderer.updateRenderCache(
+      dirtyLines,
+      themeType,
+      lineCountChangeInFlight
+    );
+    // A same-line-count edit that reshaped the session regions (an edit into
+    // a collapsed gap) changes the rendered row set, which the debounced
+    // line-type refresh below cannot express. Escalate to a deferred full
+    // re-render — never a synchronous one, since this runs mid-editor-pass
+    // and rebuilding rows the editor is about to touch detaches its geometry
+    // caches.
+    if (regionsChanged) {
+      if (this.refreshViewTimeout != null) {
+        clearTimeout(this.refreshViewTimeout);
+        this.refreshViewTimeout = undefined;
+      }
+      this.lineStateRefreshPending = true;
+      this.escalateEditSessionRender();
+      return;
+    }
+    if (shouldRefreshView) {
+      if (this.refreshViewTimeout != null) {
+        clearTimeout(this.refreshViewTimeout);
+      }
+      this.lineStateRefreshPending = true;
+      this.refreshViewTimeout = setTimeout(() => {
+        this.refreshViewTimeout = undefined;
+        if (this.options.diffStyle === 'split') {
+          this.refreshSplitDiffView();
+        } else {
+          this.refreshUnifiedDiffView();
+        }
+        this.flushDeferredLineState();
+      }, 150);
+    }
+  }
+
+  // Editor-facing visibility oracle: whether a one-based new-file line has
+  // (or will have on scroll) a rendered row under the current expansion
+  // state. See isAdditionLineRenderable.
+  public isLineRenderable(lineNumber: number): boolean {
+    const fileDiff = this.fileDiffCache;
+    if (fileDiff == null) {
+      return true;
+    }
+    const {
+      expandUnchanged = false,
+      collapsedContextThreshold = DEFAULT_COLLAPSED_CONTEXT_THRESHOLD,
+    } = this.options;
+    return isAdditionLineRenderable({
+      fileDiff,
+      lineNumber,
+      expandedHunks: expandUnchanged
+        ? true
+        : this.hunksRenderer.getExpandedHunksMap(),
+      collapsedContextThreshold,
+    });
+  }
+
+  // Fold-skip companion to isLineRenderable: the nearest renderable one-based
+  // new-file line at or beyond lineNumber in the given direction.
+  public getNearestRenderableLine(
+    lineNumber: number,
+    direction: 'up' | 'down'
+  ): number | undefined {
+    const fileDiff = this.fileDiffCache;
+    if (fileDiff == null) {
+      return lineNumber;
+    }
+    const {
+      expandUnchanged = false,
+      collapsedContextThreshold = DEFAULT_COLLAPSED_CONTEXT_THRESHOLD,
+    } = this.options;
+    return getNearestRenderableAdditionLine({
+      fileDiff,
+      lineNumber,
+      direction,
+      expandedHunks: expandUnchanged
+        ? true
+        : this.hunksRenderer.getExpandedHunksMap(),
+      collapsedContextThreshold,
+    });
+  }
+
+  // Expand collapsed context so a one-based new-file line can render: one
+  // deterministic expansion from the nearest gap edge, sized to reach the
+  // target plus the normal expansion step (clamped to the gap at render).
+  // Routed through expandHunk so subclass expansion flows (CodeView's
+  // deferred pendingExpansions) apply.
+  public revealLine(lineNumber: number): boolean {
+    const fileDiff = this.fileDiffCache;
+    const {
+      expandUnchanged = false,
+      collapsedContextThreshold = DEFAULT_COLLAPSED_CONTEXT_THRESHOLD,
+      expansionLineCount = 100,
+    } = this.options;
+    if (fileDiff == null || fileDiff.isPartial || expandUnchanged) {
+      return false;
+    }
+    const expandedHunks = this.hunksRenderer.getExpandedHunksMap();
+
+    for (const [hunkIndex, hunk] of fileDiff.hunks.entries()) {
+      const [hunkStart, hunkEnd] = getHunkAdditionLineRange(hunk);
+      if (lineNumber < hunkStart) {
+        const region = getExpandedRegion({
+          isPartial: fileDiff.isPartial,
+          rangeSize: hunk.collapsedBefore,
+          expandedHunks,
+          hunkIndex,
+          collapsedContextThreshold,
+        });
+        const gapStart = hunkStart - region.rangeSize;
+        if (
+          region.renderAll ||
+          lineNumber < gapStart + region.fromStart ||
+          lineNumber >= hunkStart - region.fromEnd
+        ) {
+          return false;
+        }
+        const fromStartDistance =
+          lineNumber - (gapStart + region.fromStart) + 1;
+        const fromEndDistance = hunkStart - region.fromEnd - lineNumber;
+        if (fromStartDistance <= fromEndDistance) {
+          this.expandHunk(
+            hunkIndex,
+            'up',
+            fromStartDistance + expansionLineCount
+          );
+        } else {
+          this.expandHunk(
+            hunkIndex,
+            'down',
+            fromEndDistance + expansionLineCount
+          );
+        }
+        return true;
+      }
+      if (lineNumber < hunkEnd) {
+        return false;
+      }
+    }
+
+    const trailingRegion = getTrailingExpandedRegion({
+      fileDiff,
+      hunkIndex: fileDiff.hunks.length - 1,
+      expandedHunks,
+      collapsedContextThreshold,
+      errorPrefix: 'FileDiff.revealLine',
+    });
+    if (trailingRegion == null || trailingRegion.renderAll) {
+      return false;
+    }
+    const lastHunk = fileDiff.hunks[fileDiff.hunks.length - 1];
+    const [, trailingStart] = getHunkAdditionLineRange(lastHunk);
+    if (
+      lineNumber < trailingStart + trailingRegion.fromStart ||
+      lineNumber >= trailingStart + trailingRegion.rangeSize
+    ) {
+      return false;
+    }
+    this.expandHunk(
+      fileDiff.hunks.length,
+      'up',
+      lineNumber -
+        (trailingStart + trailingRegion.fromStart) +
+        1 +
+        expansionLineCount
+    );
+    return true;
+  }
+
+  // Whether render() may run the session-exit recompute on dirty metadata.
+  // False while an editor is attached (the session is live). CodeView-managed
+  // instances override this: their sessions survive recycling with no editor
+  // attached, and CodeView runs the exit recompute itself when it reaps a
+  // session.
+  protected shouldSelfHealEditSession(): boolean {
+    return this.editor == null;
+  }
+
+  // Deferred full re-render for session region changes. The subsequent
+  // render() ends in syncRenderViewToEditor, which resets the editor's
+  // geometry caches against the rebuilt rows. VirtualizedFileDiff overrides
+  // this to also invalidate its layout caches.
+  protected escalateEditSessionRender(): void {
+    queueRender(this.handleEditSessionRender);
+  }
+
+  private handleEditSessionRender = (): void => {
+    this.rerender();
+    this.flushDeferredLineState();
+  };
 
   private removeRenderedCode(): void {
     this.resizeManager.cleanUp();
@@ -1017,11 +1693,15 @@ export class FileDiff<LAnnotation = undefined> {
     return true;
   }
 
-  public primeHighlightCache(): void {
-    const { fileDiff, workerManager } = this;
+  public async primeHighlightCache(
+    fileDiff: FileDiffMetadata | undefined = this.fileDiff
+  ): Promise<void> {
+    const { workerManager } = this;
     if (
       fileDiff == null ||
       workerManager == null ||
+      !workerManager.isWorkingPool() ||
+      fileDiff.cacheKey == null ||
       isDiffPlainText(fileDiff)
     ) {
       return;
@@ -1034,7 +1714,12 @@ export class FileDiff<LAnnotation = undefined> {
     ) {
       return;
     }
-    workerManager.primeDiffHighlightCache(fileDiff);
+
+    await workerManager
+      .primeDiffHighlightCache(fileDiff)
+      .catch((error: unknown) => {
+        console.error(error);
+      });
   }
 
   private cleanChildNodes() {
@@ -1051,6 +1736,7 @@ export class FileDiff<LAnnotation = undefined> {
     this.errorWrapper?.remove();
     this.headerElement?.remove();
     this.headerPrefix?.remove();
+    this.headerFilenameSuffix?.remove();
     this.headerMetadata?.remove();
     this.headerCustom?.remove();
     this.pre?.remove();
@@ -1066,6 +1752,7 @@ export class FileDiff<LAnnotation = undefined> {
     this.errorWrapper = undefined;
     this.headerElement = undefined;
     this.headerPrefix = undefined;
+    this.headerFilenameSuffix = undefined;
     this.headerMetadata = undefined;
     this.headerCustom = undefined;
     this.pre = undefined;
@@ -1194,6 +1881,9 @@ export class FileDiff<LAnnotation = undefined> {
       previousContainer ??
       document.createElement(DIFFS_TAG_NAME);
     const containerChanged = previousContainer !== nextContainer;
+    if (previousContainer != null && containerChanged) {
+      this.editor?.__captureFocusForDOMReplacement();
+    }
     if (containerChanged) {
       this.emitPostRender(true);
     }
@@ -1275,6 +1965,7 @@ export class FileDiff<LAnnotation = undefined> {
     // If we have a new parent container for the pre element, lets go ahead and
     // move it into the new container
     else if (this.pre.parentNode !== shadowRoot) {
+      this.editor?.__captureFocusForDOMReplacement();
       shadowRoot.appendChild(this.pre);
       this.appliedPreAttributes = undefined;
     }
@@ -1333,8 +2024,12 @@ export class FileDiff<LAnnotation = undefined> {
       return;
     }
 
-    const { renderCustomHeader, renderHeaderPrefix, renderHeaderMetadata } =
-      this.options;
+    const {
+      renderCustomHeader,
+      renderHeaderPrefix,
+      renderHeaderFilenameSuffix,
+      renderHeaderMetadata,
+    } = this.options;
 
     if (renderCustomHeader != null) {
       const content = renderCustomHeader(fileDiff) ?? undefined;
@@ -1345,19 +2040,28 @@ export class FileDiff<LAnnotation = undefined> {
         content
       );
       this.headerPrefix?.remove();
+      this.headerFilenameSuffix?.remove();
       this.headerMetadata?.remove();
       this.headerPrefix = undefined;
+      this.headerFilenameSuffix = undefined;
       this.headerMetadata = undefined;
       return;
     }
 
     const prefix = renderHeaderPrefix?.(fileDiff) ?? undefined;
+    const suffix = renderHeaderFilenameSuffix?.(fileDiff) ?? undefined;
     const content = renderHeaderMetadata?.(fileDiff) ?? undefined;
     this.headerPrefix = this.upsertHeaderSlotElement(
       container,
       this.headerPrefix,
       HEADER_PREFIX_SLOT_ID,
       prefix
+    );
+    this.headerFilenameSuffix = this.upsertHeaderSlotElement(
+      container,
+      this.headerFilenameSuffix,
+      HEADER_FILENAME_SUFFIX_SLOT_ID,
+      suffix
     );
     this.headerMetadata = this.upsertHeaderSlotElement(
       container,
@@ -1371,9 +2075,11 @@ export class FileDiff<LAnnotation = undefined> {
 
   private clearHeaderSlots(): void {
     this.headerPrefix?.remove();
+    this.headerFilenameSuffix?.remove();
     this.headerMetadata?.remove();
     this.headerCustom?.remove();
     this.headerPrefix = undefined;
+    this.headerFilenameSuffix = undefined;
     this.headerMetadata = undefined;
     this.headerCustom = undefined;
   }
@@ -1529,6 +2235,7 @@ export class FileDiff<LAnnotation = undefined> {
     const unifiedAST = this.hunksRenderer.renderCodeAST('unified', result);
     const deletionsAST = this.hunksRenderer.renderCodeAST('deletions', result);
     const additionsAST = this.hunksRenderer.renderCodeAST('additions', result);
+    this.editor?.__captureFocusForDOMReplacement();
     if (unifiedAST != null) {
       shouldReplace =
         this.codeUnified == null ||
@@ -1783,6 +2490,120 @@ export class FileDiff<LAnnotation = undefined> {
         'FileDiff.insertPartialHTML: Invalid argument composition'
       );
     }
+  }
+
+  // fast refresh diff view via updating the `data-line-type` after an edit.
+  // only for split view.
+  private refreshSplitDiffView(): void {
+    if (this.options.diffStyle !== 'split') {
+      return;
+    }
+
+    const hunksResult = this.hunksRenderer.renderDiff(
+      this.fileDiff,
+      this.renderRange
+    );
+    if (hunksResult == null) {
+      return;
+    }
+
+    const columns = this.getCodeColumns(
+      'split',
+      this.codeUnified,
+      this.codeDeletions,
+      this.codeAdditions
+    );
+    if (!Array.isArray(columns)) {
+      return;
+    }
+
+    const applyLineType = (
+      type: 'deletions' | 'additions',
+      column: ColumnElements | undefined
+    ) => {
+      if (column == null) {
+        return;
+      }
+      const ast = this.hunksRenderer.renderCodeAST(type, hunksResult);
+      const gutterChildren = getElementChildren(ast?.[0]);
+      const contentChildren = getElementChildren(ast?.[1]);
+      for (const [el, astChildren] of [
+        [column.gutter, gutterChildren],
+        [column.content, contentChildren],
+      ] as const) {
+        if (
+          astChildren != null &&
+          el.childElementCount === astChildren.length
+        ) {
+          for (let i = 0; i < astChildren.length; i++) {
+            const gutterElement = el.children[i] as HTMLElement;
+            const gutterChild = astChildren[i] as HASTElement;
+            const lineType = gutterChild.properties['data-line-type'] as
+              | string
+              | undefined;
+            if (
+              lineType != null &&
+              gutterElement.dataset.lineType !== lineType
+            ) {
+              gutterElement.dataset.lineType = lineType;
+            }
+          }
+        }
+      }
+    };
+
+    applyLineType('deletions', columns[0]);
+    applyLineType('additions', columns[1]);
+  }
+
+  // full diff view re-rendering
+  // only for unified view.
+  private refreshUnifiedDiffView(): void {
+    if (this.options.diffStyle !== 'unified') {
+      return;
+    }
+
+    const hunksResult = this.hunksRenderer.renderDiff(
+      this.fileDiff,
+      this.renderRange
+    );
+    if (hunksResult == null) {
+      return;
+    }
+
+    const columns = this.getCodeColumns(
+      'unified',
+      this.codeUnified,
+      this.codeDeletions,
+      this.codeAdditions
+    );
+    if (columns == null || Array.isArray(columns)) {
+      return;
+    }
+
+    const ast = this.hunksRenderer.renderCodeAST('unified', hunksResult);
+    const gutterChildren = getElementChildren(ast?.[0]);
+    const contentChildren = getElementChildren(ast?.[1]);
+    for (const [el, astChildren] of [
+      [columns.gutter, gutterChildren],
+      [columns.content, contentChildren],
+    ] as const) {
+      if (astChildren != null) {
+        el.innerHTML = toHtml(astChildren);
+      }
+    }
+
+    if (hunksResult.rowCount !== this.lastRowCount) {
+      this.applyRowSpan('unified', columns, hunksResult.rowCount);
+      this.lastRowCount = hunksResult.rowCount;
+    }
+    this.renderSeparators(hunksResult.hunkData);
+
+    this.managersDirty = true;
+    this.flushManagers();
+
+    // sync the render view to the editor
+    this.syncRenderViewToEditor();
   }
 
   private renderPartialColumn(
@@ -2174,6 +2995,12 @@ export class FileDiff<LAnnotation = undefined> {
     }
   }
 
+  protected updateBuffers(renderRange: RenderRange): void {
+    if (this.pre != null) {
+      this.applyBuffers(this.pre, renderRange);
+    }
+  }
+
   private applyBuffers(
     pre: HTMLPreElement,
     renderRange: RenderRange | undefined
@@ -2289,8 +3116,18 @@ export class FileDiff<LAnnotation = undefined> {
 
 interface HasContentProps {
   fileDiff: FileDiffMetadata | undefined;
-  oldFile: FileContents | undefined;
-  newFile: FileContents | undefined;
+  oldFile: FileContents | null | undefined;
+  newFile: FileContents | null | undefined;
+}
+
+function areOptionalFilesEqual(
+  fileA: FileContents | null | undefined,
+  fileB: FileContents | null | undefined
+): boolean {
+  if (fileA == null || fileB == null) {
+    return fileA == null && fileB == null;
+  }
+  return areFilesEqual(fileA, fileB);
 }
 
 function hasDiffContent({

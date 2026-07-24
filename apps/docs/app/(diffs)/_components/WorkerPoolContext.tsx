@@ -60,6 +60,7 @@ const HighlighterOptions: WorkerInitializationRenderOptions = {
     'cpp',
     'css',
     'go',
+    'markdown',
     'python',
     'rust',
     'sh',
@@ -69,6 +70,7 @@ const HighlighterOptions: WorkerInitializationRenderOptions = {
     'zig',
   ],
   preferredHighlighter: 'shiki-wasm',
+  useTokenTransformer: true,
 };
 
 interface WorkerPoolProps {

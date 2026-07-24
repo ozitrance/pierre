@@ -1,6 +1,8 @@
 import { JSDOM } from 'jsdom';
 
 import type { CodeView } from '../src/components/CodeView';
+import { resetPlatformDetectionForTests } from '../src/editor/platform';
+import { clearRenderQueue } from '../src/managers/UniversalRenderingManager';
 import type { CodeViewItem, FileContents } from '../src/types';
 
 export interface InstallDomNavigatorOptions {
@@ -28,6 +30,7 @@ export interface DomHandle {
    * (e.g. gutter drag selection) must declare their targets explicitly.
    */
   setElementFromPoint(x: number, y: number, element: Element): void;
+  triggerResizeObserver(target: Element): void;
 }
 
 // Installs a jsdom-backed DOM environment on globalThis for component tests.
@@ -35,6 +38,7 @@ export interface DomHandle {
 // in the past and caused harness bugs, while unused extras are harmless. The
 // returned cleanup() restores (or deletes) every global it touched.
 export function installDom(options: InstallDomOptions = {}): DomHandle {
+  clearRenderQueue();
   const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
     url: 'http://localhost',
   });
@@ -45,20 +49,27 @@ export function installDom(options: InstallDomOptions = {}): DomHandle {
   const originalValues = {
     cancelAnimationFrame: Reflect.get(globalThis, 'cancelAnimationFrame'),
     document: Reflect.get(globalThis, 'document'),
+    Document: Reflect.get(globalThis, 'Document'),
     DocumentFragment: Reflect.get(globalThis, 'DocumentFragment'),
     Element: Reflect.get(globalThis, 'Element'),
     Event: Reflect.get(globalThis, 'Event'),
+    getComputedStyle: Reflect.get(globalThis, 'getComputedStyle'),
     HTMLButtonElement: Reflect.get(globalThis, 'HTMLButtonElement'),
+    HTMLCanvasElement: Reflect.get(globalThis, 'HTMLCanvasElement'),
     HTMLDivElement: Reflect.get(globalThis, 'HTMLDivElement'),
     HTMLElement: Reflect.get(globalThis, 'HTMLElement'),
     HTMLPreElement: Reflect.get(globalThis, 'HTMLPreElement'),
     HTMLStyleElement: Reflect.get(globalThis, 'HTMLStyleElement'),
+    IntersectionObserver: Reflect.get(globalThis, 'IntersectionObserver'),
+    matchMedia: Reflect.get(globalThis, 'matchMedia'),
     MouseEvent: Reflect.get(globalThis, 'MouseEvent'),
+    MutationObserver: Reflect.get(globalThis, 'MutationObserver'),
     Node: Reflect.get(globalThis, 'Node'),
     PointerEvent: Reflect.get(globalThis, 'PointerEvent'),
     requestAnimationFrame: Reflect.get(globalThis, 'requestAnimationFrame'),
     ResizeObserver: Reflect.get(globalThis, 'ResizeObserver'),
     SVGElement: Reflect.get(globalThis, 'SVGElement'),
+    SVGSVGElement: Reflect.get(globalThis, 'SVGSVGElement'),
     window: Reflect.get(globalThis, 'window'),
   };
 
@@ -80,11 +91,73 @@ export function installDom(options: InstallDomOptions = {}): DomHandle {
     }
   }
 
+  const resizeObservers = new Set<MockResizeObserver>();
   class MockResizeObserver {
-    observe(_target: Element): void {}
-    unobserve(_target: Element): void {}
-    disconnect(): void {}
+    #callback: ResizeObserverCallback;
+    #targets = new Set<Element>();
+
+    constructor(callback: ResizeObserverCallback) {
+      this.#callback = callback;
+      resizeObservers.add(this);
+    }
+
+    observe(target: Element): void {
+      this.#targets.add(target);
+    }
+
+    unobserve(target: Element): void {
+      this.#targets.delete(target);
+    }
+
+    disconnect(): void {
+      this.#targets.clear();
+      resizeObservers.delete(this);
+    }
+
+    trigger(target: Element): void {
+      if (!this.#targets.has(target)) {
+        return;
+      }
+      this.#callback(
+        [{ target } as ResizeObserverEntry],
+        this as unknown as ResizeObserver
+      );
+    }
   }
+
+  // jsdom does not implement IntersectionObserver either; observation
+  // bookkeeping is enough for components (e.g. the Virtualizer) to construct
+  // and manage observers. Entries never intersect on their own — tests drive
+  // visibility through explicit renders and scroll events instead.
+  class MockIntersectionObserver {
+    observed = new Set<Element>();
+    constructor(public callback: IntersectionObserverCallback) {}
+    observe(target: Element): void {
+      this.observed.add(target);
+    }
+    unobserve(target: Element): void {
+      this.observed.delete(target);
+    }
+    disconnect(): void {
+      this.observed.clear();
+    }
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+  }
+
+  const matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addEventListener(): void {},
+    removeEventListener(): void {},
+    addListener(): void {},
+    removeListener(): void {},
+    dispatchEvent(): boolean {
+      return true;
+    },
+  })) as typeof window.matchMedia;
 
   const {
     maxTouchPoints = 0,
@@ -115,6 +188,23 @@ export function installDom(options: InstallDomOptions = {}): DomHandle {
   let nextFrameId = 0;
   const frames = new Map<number, ReturnType<typeof setTimeout>>();
 
+  Object.defineProperty(dom.window.HTMLCanvasElement.prototype, 'getContext', {
+    configurable: true,
+    value: (contextId: string) => {
+      if (contextId !== '2d') {
+        return null;
+      }
+      return {
+        font: '',
+        measureText: (text: string) => ({ width: text.length * 8 }),
+      };
+    },
+  });
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'scrollIntoView', {
+    configurable: true,
+    value: () => {},
+  });
+
   const pointTargets = new Map<string, Element>();
   Object.defineProperty(dom.window.document, 'elementFromPoint', {
     configurable: true,
@@ -131,15 +221,21 @@ export function installDom(options: InstallDomOptions = {}): DomHandle {
       }
     }) as typeof cancelAnimationFrame,
     document: dom.window.document,
+    Document: dom.window.Document,
     DocumentFragment: dom.window.DocumentFragment,
     Element: dom.window.Element,
     Event: dom.window.Event,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
     HTMLButtonElement: dom.window.HTMLButtonElement,
+    HTMLCanvasElement: dom.window.HTMLCanvasElement,
     HTMLDivElement: dom.window.HTMLDivElement,
     HTMLElement: dom.window.HTMLElement,
     HTMLPreElement: dom.window.HTMLPreElement,
     HTMLStyleElement: dom.window.HTMLStyleElement,
+    IntersectionObserver: MockIntersectionObserver,
+    matchMedia,
     MouseEvent: dom.window.MouseEvent,
+    MutationObserver: dom.window.MutationObserver,
     Node: dom.window.Node,
     PointerEvent: MockPointerEvent,
     requestAnimationFrame: ((callback: FrameRequestCallback) => {
@@ -153,24 +249,40 @@ export function installDom(options: InstallDomOptions = {}): DomHandle {
     }) as typeof requestAnimationFrame,
     ResizeObserver: MockResizeObserver,
     SVGElement: dom.window.SVGElement,
+    SVGSVGElement: dom.window.SVGSVGElement,
     window: dom.window,
   });
-  Object.assign(dom.window, { PointerEvent: MockPointerEvent });
+  Object.assign(dom.window, {
+    matchMedia,
+    PointerEvent: MockPointerEvent,
+    IntersectionObserver: MockIntersectionObserver,
+  });
   Object.defineProperty(globalThis, 'navigator', {
     configurable: true,
     value: navigator,
   });
+  // Platform detection memoizes on first call; reset it so it re-runs against
+  // the navigator just installed above rather than a value an earlier test
+  // cached under a different platform.
+  resetPlatformDetectionForTests();
 
   return {
     window: dom.window,
     setElementFromPoint(x: number, y: number, element: Element): void {
       pointTargets.set(`${x},${y}`, element);
     },
+    triggerResizeObserver(target: Element): void {
+      for (const resizeObserver of resizeObservers) {
+        resizeObserver.trigger(target);
+      }
+    },
     cleanup() {
+      clearRenderQueue();
       for (const timeout of frames.values()) {
         clearTimeout(timeout);
       }
       frames.clear();
+      resizeObservers.clear();
 
       for (const [key, value] of Object.entries(originalValues)) {
         if (value === undefined) {
@@ -230,6 +342,22 @@ export function createRoot(options: CreateRootOptions = {}): HTMLDivElement {
 
 export function wait(ms = 0): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Poll `predicate` every `interval` ms until it returns true or `timeout`
+// elapses, then return. On timeout it simply returns so the caller's `expect`
+// fires with the real, informative failure rather than a generic timeout.
+export async function waitFor(
+  predicate: () => boolean,
+  { timeout = 1000, interval = 5 }: { timeout?: number; interval?: number } = {}
+): Promise<void> {
+  const deadline = Date.now() + timeout;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      return;
+    }
+    await wait(interval);
+  }
 }
 
 export function dispatchScroll(root: HTMLElement): void {

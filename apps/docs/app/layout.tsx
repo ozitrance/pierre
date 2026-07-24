@@ -11,6 +11,7 @@ import {
 import localFont from 'next/font/local';
 
 import './globals.css';
+import { AppEditProvider } from '@/components/AppEditProvider';
 import { PreloadHighlighter } from '@/components/PreloadHighlighter';
 import { ScrollbarGutterVariables } from '@/components/ScrollbarGutterVariables';
 import { ThemeProvider } from '@/components/theme-provider';
@@ -144,22 +145,22 @@ const SITE_OG_IMAGE = SITE_OG_IMAGE_BY_SITE[SITE];
 const SITE_TWITTER_IMAGE = SITE_TWITTER_IMAGE_BY_SITE[SITE];
 const themeBootstrapScript = `(${String(function applyInitialTheme() {
   try {
-    const storedTheme = window.localStorage.getItem('theme');
-    const theme =
-      storedTheme === 'light' || storedTheme === 'dark'
-        ? storedTheme
+    const storedColorMode = window.localStorage.getItem('theme');
+    const colorMode =
+      storedColorMode === 'light' || storedColorMode === 'dark'
+        ? storedColorMode
         : 'system';
-    const resolvedTheme =
-      theme === 'system'
+    const resolvedColorScheme =
+      colorMode === 'system'
         ? window.matchMedia('(prefers-color-scheme: dark)').matches
           ? 'dark'
           : 'light'
-        : theme;
+        : colorMode;
     const root = document.documentElement;
 
     root.classList.remove('light', 'dark');
-    root.classList.add(resolvedTheme);
-    root.style.colorScheme = resolvedTheme;
+    root.classList.add(resolvedColorScheme);
+    root.style.colorScheme = resolvedColorScheme;
 
     // Set the iOS navbar tint before first paint so it matches the resolved
     // mode immediately. The meta is created here (not authored in JSX, which
@@ -174,7 +175,7 @@ const themeBootstrapScript = `(${String(function applyInitialTheme() {
     }
     themeColorMeta.setAttribute(
       'content',
-      resolvedTheme === 'dark' ? '#0a0a0a' : '#ffffff'
+      resolvedColorScheme === 'dark' ? '#0a0a0a' : '#ffffff'
     );
   } catch {
     // Ignore storage/media failures and let CSS defaults apply.
@@ -232,7 +233,7 @@ export default function RootLayout({
       <body className={SITE}>
         <ScrollbarGutterVariables />
         <ThemeProvider attribute="class">
-          {children}
+          <AppEditProvider>{children}</AppEditProvider>
           <Toaster />
           <div
             id="dark-mode-portal-container"
