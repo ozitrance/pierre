@@ -1,6 +1,7 @@
 import type {
   FileTreeContextMenuButtonVisibility,
   FileTreeContextMenuTriggerMode,
+  FileTreeViewMode,
   FileTreeVisibleRow,
 } from '../model/publicTypes';
 import type { GitStatus } from '../publicTypes';
@@ -38,6 +39,9 @@ export type FileTreeRowElementAttributesInput = {
   itemHeight: number;
   features: FileTreeRowFeatureFlags;
   state: FileTreeRowStateFlags;
+  // Explorer rows are flat listbox options: no aria-expanded/aria-level, and
+  // `option` instead of `treeitem`.
+  viewMode?: FileTreeViewMode;
   extraStyle?: Record<string, string | undefined>;
 };
 
@@ -58,9 +62,12 @@ export function computeFileTreeRowElementAttributes(
     itemHeight,
     features,
     state,
+    viewMode,
     extraStyle,
   } = input;
   const isSticky = mode === 'sticky';
+  // Columns-view rows are flat listbox options too, one listbox per pane.
+  const isExplorer = viewMode === 'explorer' || viewMode === 'columns';
   const parentPath = row.ancestorPaths.at(-1) ?? '';
 
   const stateAttributes: Record<string, unknown> = {};
@@ -88,10 +95,12 @@ export function computeFileTreeRowElementAttributes(
 
   return {
     'aria-expanded':
-      !isSticky && row.kind === 'directory' ? row.isExpanded : undefined,
+      !isSticky && !isExplorer && row.kind === 'directory'
+        ? row.isExpanded
+        : undefined,
     'aria-haspopup': features.contextMenuEnabled ? 'menu' : undefined,
     'aria-label': ariaLabel,
-    'aria-level': !isSticky ? row.level + 1 : undefined,
+    'aria-level': !isSticky && !isExplorer ? row.level + 1 : undefined,
     'aria-posinset': !isSticky ? row.posInSet + 1 : undefined,
     'aria-selected': !isSticky
       ? row.isSelected
@@ -117,7 +126,7 @@ export function computeFileTreeRowElementAttributes(
     'data-item-type': row.kind === 'directory' ? 'folder' : 'file',
     'data-type': 'item',
     id: !isSticky ? domId : undefined,
-    role: !isSticky ? 'treeitem' : undefined,
+    role: !isSticky ? (isExplorer ? 'option' : 'treeitem') : undefined,
     style: { minHeight: `${itemHeight}px`, ...extraStyle },
     tabIndex: !isSticky && row.isFocused ? 0 : -1,
     ...stateAttributes,

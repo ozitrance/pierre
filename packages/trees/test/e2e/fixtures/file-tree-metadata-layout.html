@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>file-tree metadata layout fixture</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 16px;
+      }
+
+      [data-file-tree-metadata-layout-mount] {
+        width: 280px;
+        height: 220px;
+        border: 1px solid #ccc;
+      }
+
+      [data-file-tree-metadata-layout-controls] {
+        margin-bottom: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <div data-file-tree-metadata-layout-controls>
+      <button type="button" data-view-mode="tree">Tree</button>
+      <button type="button" data-view-mode="explorer">Explorer</button>
+    </div>
+    <div data-file-tree-metadata-layout-mount></div>
+
+    <script type="module">
+      import { FileTree } from '/dist/index.js';
+
+      const mount = document.querySelector(
+        '[data-file-tree-metadata-layout-mount]'
+      );
+      if (!(mount instanceof HTMLDivElement)) {
+        throw new Error('Missing file-tree metadata layout mount.');
+      }
+
+      const priorityPath = 'priority-name.ts';
+      const fileTree = new FileTree({
+        columns: [
+          { kind: 'message', width: '160px' },
+          { kind: 'modified', width: '64px' },
+          { kind: 'size', width: '64px' },
+        ],
+        initialExpansion: 'open',
+        metadata: [
+          {
+            path: priorityPath,
+            commitMessage: 'Keep every metadata column visible',
+            modifiedAt: Date.now() - 60_000,
+            sizeBytes: 4096,
+          },
+        ],
+        paths: [priorityPath, 'src/', 'src/index.ts'],
+        viewMode: 'tree',
+      });
+
+      fileTree.render({ containerWrapper: mount });
+      document
+        .querySelectorAll('[data-view-mode]')
+        .forEach((button) =>
+          button.addEventListener('click', () =>
+            fileTree.setViewMode(button.dataset.viewMode)
+          )
+        );
+
+      const waitForTree = async () => {
+        const started = performance.now();
+        while (true) {
+          const host = mount.querySelector('file-tree-container');
+          if (
+            host instanceof HTMLElement &&
+            host.shadowRoot?.querySelector(
+              `button[data-item-path="${priorityPath}"]`
+            ) != null
+          ) {
+            return;
+          }
+
+          if (performance.now() - started > 5_000) {
+            throw new Error(
+              'Timed out waiting for the file-tree metadata layout fixture.'
+            );
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, 16));
+        }
+      };
+
+      await waitForTree();
+      window.__fileTreeMetadataLayoutFixture = fileTree;
+      window.__fileTreeMetadataLayoutFixtureReady = true;
+    </script>
+  </body>
+</html>
