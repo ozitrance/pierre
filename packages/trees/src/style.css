@@ -1328,16 +1328,18 @@
 
   /* METADATA COLUMNS
    * Right-aligned detail cells (size, modified time, commit message). The
-   * lane absorbs the free row width so cells line up as columns; the message
-   * cell is the flexible one and truncates first. */
+   * lane receives the width left after the item name so cells line up without
+   * squeezing the primary label away. The message cell is the flexible one
+   * and truncates first; any remaining fixed-cell overflow is clipped. */
   [data-item-section='metadata'] {
-    flex: 1 0 auto;
+    flex: 1 1 0;
     min-width: 0;
     display: flex;
     align-items: center;
     justify-content: flex-end;
     gap: var(--trees-item-row-gap);
     margin-inline-start: auto;
+    overflow: hidden;
     color: var(--trees-fg-muted);
     font-variant-numeric: tabular-nums;
   }
