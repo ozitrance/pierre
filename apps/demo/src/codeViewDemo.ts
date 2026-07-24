@@ -6,6 +6,7 @@ import {
   type CodeViewOptions,
   type DiffLineAnnotation,
   type DiffsThemeNames,
+  type FileDiffContentsLoader,
   type LineAnnotation,
   type ParsedPatch,
   type SelectedLineRange,
@@ -14,6 +15,9 @@ import {
 import type { WorkerPoolManager } from '@pierre/diffs/worker';
 
 import { FAKE_DIFF_LINE_ANNOTATIONS, type LineCommentMetadata } from './mocks/';
+import { createHeaderFilenameSuffixBadge } from './utils/createHeaderFilenameSuffixBadge';
+
+const RENDER_FILENAME_SUFFIX = false;
 
 type CodeViewCommentMetadata =
   | CodeViewSavedCommentMetadata
@@ -58,6 +62,7 @@ interface RenderDemoCodeViewOptions {
   overflow: CodeViewOverflow;
   theme: DiffsThemeNames | ThemesType;
   themeType: CodeViewThemeType;
+  loadDiffFiles?: FileDiffContentsLoader;
   workerManager?: WorkerPoolManager;
 }
 
@@ -81,6 +86,7 @@ export function renderDemoCodeView(
     overflow,
     theme,
     themeType,
+    loadDiffFiles,
     workerManager,
   }: RenderDemoCodeViewOptions
 ) {
@@ -88,18 +94,43 @@ export function renderDemoCodeView(
 
   const items = createCodeViewItems(parsedPatches);
   const options: CodeViewOptions<CodeViewCommentMetadata> = {
+    // __devOnlyValidateItemHeights: true,
     theme,
     themeType,
     diffStyle,
     overflow,
+    loadDiffFiles,
     renderAnnotation(annotation) {
       return renderCodeViewAnnotation(annotation, viewer, items);
     },
+    ...(RENDER_FILENAME_SUFFIX
+      ? {
+          renderHeaderFilenameSuffix() {
+            return createHeaderFilenameSuffixBadge('CodeView slot');
+          },
+        }
+      : null),
     lineHoverHighlight: 'both',
     expansionLineCount: 10,
     enableLineSelection: true,
     enableGutterUtility: true,
     stickyHeaders: true,
+    // renderCodeViewHeader() {
+    //   const el = document.createElement('div');
+    //   el.textContent = 'CodeView header — scrolls with the content';
+    //   el.style.padding = '20px';
+    //   el.style.textAlign = 'center';
+    //   el.style.borderBottom =
+    //     '1px solid var(--color-border, rgba(128, 128, 128, 0.3))';
+    //   return el;
+    // },
+    // renderCodeViewFooter() {
+    //   const el = document.createElement('div');
+    //   el.textContent = 'CodeView footer 🫶';
+    //   el.style.padding = '40px';
+    //   el.style.textAlign = 'center';
+    //   return el;
+    // },
     layout: { paddingTop: 10, paddingBottom: 24, gap: 12 },
     onGutterUtilityClick(range, context) {
       if (context.item.type !== 'diff') {

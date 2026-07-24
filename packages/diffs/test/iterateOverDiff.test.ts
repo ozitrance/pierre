@@ -206,6 +206,86 @@ describe('iterateOverDiff', () => {
     }
   });
 
+  test('windowed expanded iteration matches full iteration line identities for unified and split styles', () => {
+    const expandedDiff = createWindowedSeparatorDiff([
+      {
+        type: 'context',
+        lines: 2,
+        deletionLineIndex: COLLAPSED_BEFORE,
+        additionLineIndex: COLLAPSED_BEFORE,
+      },
+      {
+        type: 'change',
+        deletions: 2,
+        deletionLineIndex: COLLAPSED_BEFORE + 2,
+        additions: 3,
+        additionLineIndex: COLLAPSED_BEFORE + 2,
+      },
+      {
+        type: 'context',
+        lines: 4,
+        deletionLineIndex: COLLAPSED_BEFORE + 4,
+        additionLineIndex: COLLAPSED_BEFORE + 5,
+      },
+    ]);
+    const cases: Array<{
+      name: string;
+      expandedHunks: Map<number, { fromStart: number; fromEnd: number }>;
+      startingLines: number[];
+    }> = [
+      {
+        name: 'fromStart only',
+        expandedHunks: new Map([[0, { fromStart: 2, fromEnd: 0 }]]),
+        startingLines: [0, 1, 2, 3, 4, 6],
+      },
+      {
+        name: 'fromEnd only',
+        expandedHunks: new Map([[0, { fromStart: 0, fromEnd: 3 }]]),
+        startingLines: [0, 1, 2, 3, 4, 6],
+      },
+      {
+        name: 'fromStart and fromEnd',
+        expandedHunks: new Map([[0, { fromStart: 2, fromEnd: 3 }]]),
+        startingLines: [0, 1, 2, 3, 4, 5, 8],
+      },
+    ];
+
+    for (const diffStyle of ['unified', 'split'] as const) {
+      for (const testCase of cases) {
+        const fullRows = collectRows({
+          diff: expandedDiff,
+          diffStyle,
+          expandedHunks: testCase.expandedHunks,
+        });
+
+        for (const startingLine of testCase.startingLines) {
+          const totalLines = Math.min(3, fullRows.length - startingLine);
+          const windowedRows = collectRows({
+            diff: expandedDiff,
+            diffStyle,
+            expandedHunks: testCase.expandedHunks,
+            startingLine,
+            totalLines,
+          });
+
+          expect({
+            name: testCase.name,
+            diffStyle,
+            startingLine,
+            rows: getRowIdentities(windowedRows),
+          }).toEqual({
+            name: testCase.name,
+            diffStyle,
+            startingLine,
+            rows: getRowIdentities(
+              fullRows.slice(startingLine, startingLine + totalLines)
+            ),
+          });
+        }
+      }
+    }
+  });
+
   test('both style includes rows visible in either split or unified coordinates for uneven changes', () => {
     const unevenDiff = createSingleHunkDiff({
       hunkContent: [
@@ -414,6 +494,42 @@ describe('iterateOverDiff', () => {
     ]);
   });
 
+  test('expands every new-file line around a context-zero deletion', () => {
+    const oldLines = Array.from(
+      { length: 7 },
+      (_, index) => `line ${index + 1}\n`
+    );
+    const newLines = oldLines.toSpliced(4, 1);
+    const deletionDiff = parseDiffFromFile(
+      { name: 'deletion.ts', contents: oldLines.join('') },
+      { name: 'deletion.ts', contents: newLines.join('') },
+      { context: 0 }
+    );
+
+    const additions = collectRows({
+      diff: deletionDiff,
+      diffStyle: 'split',
+      expandedHunks: true,
+    }).flatMap((row) => {
+      if (row.additionLine == null) return [];
+      return [
+        {
+          lineIndex: row.additionLine.lineIndex,
+          lineNumber: row.additionLine.lineNumber,
+          text: deletionDiff.additionLines[row.additionLine.lineIndex],
+        },
+      ];
+    });
+
+    expect(additions).toEqual(
+      newLines.map((text, lineIndex) => ({
+        lineIndex,
+        lineNumber: lineIndex + 1,
+        text,
+      }))
+    );
+  });
+
   test('windowed iteration preserves collapsedBefore and collapsedAfter separator placement', () => {
     const leadingRows = collectRows({
       diff: createWindowedSeparatorDiff([
@@ -509,6 +625,20 @@ describe('iterateOverDiff', () => {
         expectedType: 'context',
       },
       {
+        name: 'hunk context after expanded fromEnd boundary',
+        diff: createWindowedSeparatorDiff([
+          {
+            type: 'context',
+            lines: 3,
+            deletionLineIndex: COLLAPSED_BEFORE,
+            additionLineIndex: COLLAPSED_BEFORE,
+          },
+        ]),
+        expandedHunks: new Map([[0, { fromStart: 0, fromEnd: 3 }]]),
+        startingLine: 3,
+        expectedType: 'context',
+      },
+      {
         name: 'hunk change content',
         diff: createWindowedSeparatorDiff([
           {
@@ -526,26 +656,29 @@ describe('iterateOverDiff', () => {
     ];
 
     for (const testCase of cases) {
-      const rows: Array<{ type: string; collapsedBefore: number }> = [];
+      for (const diffStyle of ['unified', 'split'] as const) {
+        const rows: Array<{ type: string; collapsedBefore: number }> = [];
 
-      iterateOverDiff({
-        diff: testCase.diff,
-        diffStyle: 'unified',
-        expandedHunks: testCase.expandedHunks,
-        startingLine: testCase.startingLine,
-        totalLines: 1,
-        callback: (props) => {
-          rows.push({
-            type: props.type,
-            collapsedBefore: props.collapsedBefore,
-          });
-        },
-      });
+        iterateOverDiff({
+          diff: testCase.diff,
+          diffStyle,
+          expandedHunks: testCase.expandedHunks,
+          startingLine: testCase.startingLine,
+          totalLines: 1,
+          callback: (props) => {
+            rows.push({
+              type: props.type,
+              collapsedBefore: props.collapsedBefore,
+            });
+          },
+        });
 
-      expect({ name: testCase.name, rows }).toEqual({
-        name: testCase.name,
-        rows: [{ type: testCase.expectedType, collapsedBefore: 0 }],
-      });
+        expect({ name: testCase.name, diffStyle, rows }).toEqual({
+          name: testCase.name,
+          diffStyle,
+          rows: [{ type: testCase.expectedType, collapsedBefore: 0 }],
+        });
+      }
     }
   });
 });
@@ -608,6 +741,20 @@ function serializeLine(
     lineNumber: line.lineNumber,
     noEOFCR: line.noEOFCR,
   };
+}
+
+function getRowIdentities(rows: RowSnapshot[]): Array<{
+  type: DiffLineCallbackProps['type'];
+  hunkIndex: number;
+  deletionLine: LineSnapshot | undefined;
+  additionLine: LineSnapshot | undefined;
+}> {
+  return rows.map((row) => ({
+    type: row.type,
+    hunkIndex: row.hunkIndex,
+    deletionLine: row.deletionLine,
+    additionLine: row.additionLine,
+  }));
 }
 
 // A change block that pairs at least one deletion row with an addition row,

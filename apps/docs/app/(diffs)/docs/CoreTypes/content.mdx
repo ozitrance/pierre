@@ -1,43 +1,98 @@
 ## Core Types
 
-Before diving into the components, it's helpful to understand the two core data
-structures used throughout the library.
+Before diving into the components, it's helpful to understand the core file,
+diff, and annotation data structures used throughout the library.
 
 ### FileContents
 
-`FileContents` represents a single file. Use it when rendering a file with the
-`<File>` component, or pass two of them as `oldFile` and `newFile` to diff
-components.
+`FileContents` represents one existing file version. Use it when rendering a
+file with the `<File>` component, or pass it as `oldFile` and/or `newFile` to
+diff components. For added or deleted files, pass `null` for the intentionally
+missing side.
+
+An omitted side is not the same as `null`. If you provide either `oldFile` or
+`newFile`, provide the other side too, using `null` only when that file side
+does not exist. Empty file contents are still a real file; represent them with
+`contents: ''`, not `null`.
 
 <DocsCodeExample {...fileContentsType} />
 
+For read-only rendering and Worker Pool caching, `cacheKey` is optional; when
+provided, treat it as a revision identity and change it with the contents,
+filename, language, or revision. When
+[`Editor.persistState`](#edit-mode-editor-options-persisting-file-state) is
+enabled, every editable file requires an explicit, non-empty `cacheKey`. Use
+unique, stable keys for editing sessions, and change the key when incoming
+contents should replace the cached document.
+
 ### FileDiffMetadata
 
-`FileDiffMetadata` represents the differences between two files. It contains the
-hunks (changed regions), line counts, and optionally the full file contents for
-expansion.
+`FileDiffMetadata` represents the differences between file versions. It contains
+the hunks (changed regions), line counts, and optionally the full file contents
+for expansion (if possible).
+
+When a component uses `loadDiffFiles`, treat `FileDiffMetadata` as mutable
+render metadata. A partial metadata object parsed from a patch can be upgraded
+in place: `isPartial` flips to `false`, hunks and line arrays are replaced with
+hydrated values, and the object identity is preserved.
+
+If you reparse a patch or create a new partial `FileDiffMetadata`, the renderer
+treats it as a fresh partial model. Keep the same metadata object stable when
+you want hydration to persist.
+
+When loaded files provide cache keys, hydration uses those keys so full-file
+highlights can be reused across diffs. Change each `FileContents.cacheKey`
+whenever the loaded contents, filename, language, or revision changes. If loaded
+files are unkeyed but the partial metadata has a `cacheKey`, hydration appends a
+hydrated segment as a fallback.
 
 **Tip:** You can generate `FileDiffMetadata` using
-[`parseDiffFromFile`](#utilities-parsedifffromfile) (from two file versions) or
+[`parseDiffFromFile`](#utilities-parsedifffromfile) (from file contents) or
 [`parsePatchFiles`](#utilities-parsepatchfiles) (from a patch string).
 
 <DocsCodeExample {...fileDiffMetadataType} />
+
+### LineAnnotation and DiffLineAnnotation
+
+`LineAnnotation<T>` places content on a file line and contains `lineNumber` plus
+typed `metadata`. Metadata is required when `T` is a concrete type and omitted
+when `T` is `undefined`. `DiffLineAnnotation<T>` adds
+`side: 'additions' | 'deletions'` to select a file side. Line coordinates are
+one-based on the selected file side, not row positions in the rendered diff. Use
+`lineNumber: 0` for a file-level annotation above the first file line or, in a
+diff, above the first hunk or row on that side.
+
+Callbacks shared by file and diff surfaces use
+`LineAnnotation[] | DiffLineAnnotation[]`. Use `isFileAnnotationCollection` or
+`isDiffAnnotationCollection` to narrow the collection before reading
+shape-specific fields. For individual annotation unions, use `isFileAnnotation`
+or `isDiffAnnotation`.
+
+Store a stable, position-independent application ID in metadata when an
+annotation owns drafts or other interactive state. For annotations that survive
+an edit, edit mode preserves metadata while remapping line coordinates. For the
+controlled update pattern and exact remapping rules, see
+[Editing with line annotations](#edit-mode-editing-with-line-annotations).
+
+<DocsCodeExample {...lineAnnotationTypes} />
 
 ### Creating Diffs
 
 There are two ways to create a `FileDiffMetadata`.
 
-#### From Two Files
+#### From File Contents
 
-Use `parseDiffFromFile` when you have both file versions. This approach includes
-the full file contents, enabling the "expand unchanged" feature.
+Use `parseDiffFromFile` when you have the full file contents. Pass both sides
+for a changed file, `oldFile: null` for a new file, or `newFile: null` for a
+deleted file. This approach allows collapsed regions to be expanded.
 
 <DocsCodeExample {...parseDiffFromFileExample} />
 
 #### From a Patch String
 
 Use `parsePatchFiles` when you have a unified diff or patch file. This is useful
-when working with git output or patch files from APIs.
+when working with git output or patch files from APIs. Patch-derived metadata is
+partial until a renderer hydrates it with full files from `loadDiffFiles`.
 
 <DocsCodeExample {...parsePatchFilesExample} />
 

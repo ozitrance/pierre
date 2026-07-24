@@ -7,6 +7,7 @@ import {
   DEFAULT_TOKENIZE_MAX_LENGTH,
   DIFFS_TAG_NAME,
   EMPTY_RENDER_RANGE,
+  HEADER_FILENAME_SUFFIX_SLOT_ID,
   HEADER_METADATA_SLOT_ID,
   HEADER_PREFIX_SLOT_ID,
   THEME_CSS_ATTRIBUTE,
@@ -25,7 +26,12 @@ import { SVGSpriteSheet } from '../sprite';
 import type {
   AppliedThemeStyleCache,
   BaseCodeOptions,
+  DiffsEditableComponent,
+  DiffsEditor,
+  DiffsTextDocument,
+  EditorActiveLineOptions,
   FileContents,
+  HighlightedToken,
   LineAnnotation,
   PostRenderPhase,
   PrePropertiesConfig,
@@ -59,7 +65,7 @@ import { setPreNodeProperties } from '../utils/setWrapperNodeProps';
 import type { WorkerPoolManager } from '../worker';
 import { DiffsContainerLoaded } from './web-components';
 
-const EMPTY_STRINGS: string[] = [];
+const EMPTY_STRINGS: string[] = [''];
 
 export interface FileRenderProps<LAnnotation> {
   file: FileContents;
@@ -84,6 +90,7 @@ export interface FileOptions<LAnnotation>
   extends BaseCodeOptions, InteractionManagerBaseOptions<'file'> {
   disableFileHeader?: boolean;
   renderHeaderPrefix?: RenderFileMetadata;
+  renderHeaderFilenameSuffix?: RenderFileMetadata;
   renderHeaderMetadata?: RenderFileMetadata;
   renderCustomHeader?: RenderFileMetadata;
   /**
@@ -123,7 +130,9 @@ interface HydrationSetup<LAnnotation> {
 
 let instanceId = -1;
 
-export class File<LAnnotation = undefined> {
+export class File<
+  LAnnotation = undefined,
+> implements DiffsEditableComponent<LAnnotation> {
   static LoadedCustomComponent: boolean = DiffsContainerLoaded;
 
   readonly __id: string = `file:${++instanceId}`;
@@ -152,6 +161,7 @@ export class File<LAnnotation = undefined> {
   protected headerElement: HTMLElement | undefined;
   protected headerCustom: HTMLElement | undefined;
   protected headerPrefix: HTMLElement | undefined;
+  protected headerFilenameSuffix: HTMLElement | undefined;
   protected headerMetadata: HTMLElement | undefined;
 
   protected fileRenderer: FileRenderer<LAnnotation>;
@@ -166,6 +176,8 @@ export class File<LAnnotation = undefined> {
   public file: FileContents | undefined;
   protected renderRange: RenderRange | undefined;
   protected enabled = true;
+
+  protected editor: DiffsEditor<LAnnotation> | undefined;
 
   constructor(
     public options: FileOptions<LAnnotation> = { theme: DEFAULT_THEMES },
@@ -196,6 +208,10 @@ export class File<LAnnotation = undefined> {
       forceRender: true,
       renderRange: this.renderRange,
     });
+  }
+
+  public __getCurrentFile(): FileContents | undefined {
+    return this.file;
   }
 
   public onThemeChange(): void {
@@ -274,6 +290,26 @@ export class File<LAnnotation = undefined> {
     this.interactionManager.setSelection(range, options);
   }
 
+  public setEditorActiveLine(
+    lineNumber: number | null,
+    options?: EditorActiveLineOptions
+  ): void {
+    this.interactionManager.setEditorActiveLine(lineNumber, {
+      lineNumberOnly: options?.lineNumberOnly,
+      side: options?.side ?? 'additions',
+    });
+  }
+
+  public getCodeScrollLeft(): number {
+    return this.code?.scrollLeft ?? 0;
+  }
+
+  public setCodeScrollLeft(position: number): void {
+    if (this.code != null) {
+      this.code.scrollLeft = position;
+    }
+  }
+
   public flushManagers(): void {
     if (!this.managersDirty || this.pre == null) {
       this.managersDirty = false;
@@ -282,12 +318,24 @@ export class File<LAnnotation = undefined> {
 
     const { overflow = 'scroll' } = this.options;
     this.interactionManager.setup(this.pre);
-    this.resizeManager.setup(this.pre, overflow === 'wrap');
+    this.resizeManager.setup(this.pre, {
+      disableAnnotations: overflow === 'wrap',
+      columnVariables: this.shouldApplyColumnVariables(overflow)
+        ? 'apply'
+        : 'measure',
+    });
     this.managersDirty = false;
+  }
+
+  protected shouldApplyColumnVariables(overflow: 'scroll' | 'wrap'): boolean {
+    return overflow === 'scroll' && this.lineAnnotations.length > 0;
   }
 
   public cleanUp(recycle = false): void {
     this.emitPostRender(true);
+    // Persist editor state while the code scroller still exists.
+    this.editor?.cleanUp(recycle);
+    this.editor = undefined;
     this.resizeManager.cleanUp();
     this.interactionManager.cleanUp();
     this.managersDirty = false;
@@ -303,26 +351,31 @@ export class File<LAnnotation = undefined> {
     if (!recycle) {
       this.lineAnnotations = [];
     }
-    this.annotationCache.clear();
+    this.clearAuxiliaryNodes();
     this.pre = undefined;
+    this.bufferBefore?.remove();
     this.bufferBefore = undefined;
+    this.bufferAfter?.remove();
     this.bufferAfter = undefined;
     this.appliedPreAttributes = undefined;
     this.lastRowCount = undefined;
     this.headerElement = undefined;
     this.headerPrefix = undefined;
+    this.headerFilenameSuffix = undefined;
     this.headerMetadata = undefined;
     this.headerCustom = undefined;
     this.lastRenderedHeaderHTML = undefined;
     if (!recycle) {
       this.cachedHeaderHTML = undefined;
     }
+    this.errorWrapper?.remove();
     this.errorWrapper = undefined;
     this.themeCSSStyle = undefined;
     this.appliedThemeCSS = undefined;
     this.hasAdoptedThemeCSS = false;
     this.unsafeCSSStyle = undefined;
     this.appliedUnsafeCSS = undefined;
+    this.placeHolder?.remove();
     this.placeHolder = undefined;
     this.unsafeCSSStyle = undefined;
 
@@ -333,7 +386,6 @@ export class File<LAnnotation = undefined> {
       this.workerManager = undefined;
       this.file = undefined;
     }
-
     this.enabled = false;
   }
 
@@ -350,6 +402,16 @@ export class File<LAnnotation = undefined> {
       file,
       lineAnnotations,
     } = props;
+    if (!this.enabled) {
+      throw new Error(
+        'File.hydrate: attempting to call hydrate after cleaned up'
+      );
+    }
+    if (this.fileContainer != null) {
+      throw new Error(
+        'File.hydrate: hydrate can only be called before the instance has rendered or hydrated'
+      );
+    }
     this.hydrateElements(fileContainer, prerenderedHTML);
     if (
       shouldRenderCode(this.pre, file, this.options.collapsed) ||
@@ -449,7 +511,99 @@ export class File<LAnnotation = undefined> {
       : EMPTY_STRINGS;
   }
 
-  public render({
+  protected updateBuffers(renderRange: RenderRange): void {
+    if (this.pre != null) {
+      this.applyBuffers(this.pre, renderRange);
+    }
+  }
+
+  private syncRenderViewToEditor(): void {
+    const editor = this.editor;
+    const fileContainer = this.fileContainer;
+    const file = this.file;
+    const lineAnnotations = this.lineAnnotations;
+    const renderRange = this.renderRange;
+    if (editor != null && fileContainer != null && file != null) {
+      void this.fileRenderer.initializeHighlighter().then((highlighter) => {
+        if (
+          !this.enabled ||
+          this.editor !== editor ||
+          this.fileContainer !== fileContainer ||
+          this.file !== file
+        ) {
+          return;
+        }
+        editor.__syncRenderView(
+          highlighter,
+          fileContainer,
+          file,
+          lineAnnotations,
+          renderRange
+        );
+      });
+    }
+  }
+
+  public attachEditor(editor: DiffsEditor<LAnnotation>): () => void {
+    this.editor?.cleanUp();
+    this.editor = editor;
+    const preparedFile =
+      this.file == null ? undefined : editor.__prepareFile?.(this.file);
+    if (preparedFile !== undefined && preparedFile !== this.file) {
+      this.renderPreparedFile({
+        file: preparedFile,
+        forceRender: true,
+        preventEmit: true,
+        renderRange: this.renderRange,
+      });
+    } else {
+      this.syncRenderViewToEditor();
+    }
+    return () => {
+      this.editor = undefined;
+    };
+  }
+
+  // normally triggered by the host when the document line count changes
+  public applyDocumentChange(
+    textDocument: DiffsTextDocument,
+    newLineAnnotations?: LineAnnotation<LAnnotation>[]
+  ): void {
+    this.fileRenderer.applyDocumentChange(textDocument);
+    if (
+      newLineAnnotations != null &&
+      newLineAnnotations !== this.lineAnnotations &&
+      this.file != null
+    ) {
+      this.setLineAnnotations(newLineAnnotations);
+      this.fileRenderer.setLineAnnotations(this.lineAnnotations);
+      this.renderAnnotations();
+    }
+  }
+
+  public updateRenderCache(
+    dirtyLines: Map<number, Array<HighlightedToken>>,
+    themeType: 'dark' | 'light'
+  ): void {
+    this.fileRenderer.updateRenderCache(dirtyLines, themeType);
+  }
+
+  public render(props: FileRenderProps<LAnnotation>): boolean {
+    if (!this.enabled) {
+      throw new Error(
+        'File.render: attempting to call render after cleaned up'
+      );
+    }
+
+    const file = this.editor?.__prepareFile?.(props.file) ?? props.file;
+    return this.renderPreparedFile(
+      file === props.file ? props : { ...props, file }
+    );
+  }
+
+  // Renders a file whose persisted document has already been restored. The
+  // virtualized subclass overrides this phase so layout uses the same file.
+  protected renderPreparedFile({
     file,
     fileContainer,
     forceRender = false,
@@ -459,12 +613,11 @@ export class File<LAnnotation = undefined> {
     lineAnnotations,
     renderRange,
   }: FileRenderProps<LAnnotation>): boolean {
+    // postpone background tokenizing to next frame for avoiding UI freeze
+    // during render
+    this.editor?.__postponeBgTokenizeToNextFrame();
+
     const { collapsed = false, themeType = 'system' } = this.options;
-    if (!this.enabled) {
-      throw new Error(
-        'File.render: attempting to call render after cleaned up'
-      );
-    }
     const nextRenderRange = collapsed ? undefined : renderRange;
     const previousRenderRange = this.renderRange;
     const themeChanged = this.hasThemeChanged();
@@ -473,7 +626,9 @@ export class File<LAnnotation = undefined> {
       (lineAnnotations.length > 0 || this.lineAnnotations.length > 0)
         ? lineAnnotations !== this.lineAnnotations
         : false;
-    const didFileChange = !areFilesEqual(this.file, file);
+    const didFileChange =
+      !areFilesEqual(this.file, file) ||
+      this.fileRenderer.hasUnkeyedFileContentsChanged(file);
     if (
       !collapsed &&
       !forceRender &&
@@ -588,6 +743,9 @@ export class File<LAnnotation = undefined> {
       }
       this.renderAnnotations();
       this.renderGutterUtility();
+      if (this.editor != null) {
+        this.syncRenderViewToEditor();
+      }
     } catch (error: unknown) {
       if (disableErrorHandling) {
         throw error;
@@ -706,7 +864,7 @@ export class File<LAnnotation = undefined> {
     ) {
       return;
     }
-    workerManager.primeFileHighlightCache(file);
+    void workerManager.primeFileHighlightCache(file).catch(() => undefined);
   }
 
   private cleanChildNodes() {
@@ -720,6 +878,7 @@ export class File<LAnnotation = undefined> {
     this.headerElement?.remove();
     this.gutterUtilityContent?.remove();
     this.headerPrefix?.remove();
+    this.headerFilenameSuffix?.remove();
     this.headerMetadata?.remove();
     this.headerCustom?.remove();
     this.pre?.remove();
@@ -734,6 +893,7 @@ export class File<LAnnotation = undefined> {
     this.headerElement = undefined;
     this.gutterUtilityContent = undefined;
     this.headerPrefix = undefined;
+    this.headerFilenameSuffix = undefined;
     this.headerMetadata = undefined;
     this.headerCustom = undefined;
     this.pre = undefined;
@@ -916,10 +1076,20 @@ export class File<LAnnotation = undefined> {
     this.cleanupErrorWrapper();
     this.applyPreNodeAttributes(pre, result);
     this.code = getOrCreateCodeNode({ code: this.code });
-    this.code.innerHTML = this.fileRenderer.renderPartialHTML(
-      this.fileRenderer.renderCodeAST(result)
-    );
-    pre.replaceChildren(this.code);
+    const codeAst = this.fileRenderer.renderCodeAST(result);
+    if (this.code.childElementCount >= 2) {
+      for (let i = 0; i < 2; i++) {
+        const domEl = this.code.children[i] as HTMLElement;
+        const astEl = codeAst[i] as HASTElement;
+        domEl.innerHTML = toHtml(astEl.children);
+        domEl.style.cssText = astEl.properties.style as string;
+      }
+    } else {
+      this.code.innerHTML = toHtml(codeAst);
+    }
+    if (!pre.contains(this.code)) {
+      pre.replaceChildren(this.code);
+    }
     this.lastRowCount = result.rowCount;
   }
 
@@ -1209,8 +1379,12 @@ export class File<LAnnotation = undefined> {
 
     if (this.isContainerManaged) return;
 
-    const { renderHeaderPrefix, renderCustomHeader, renderHeaderMetadata } =
-      this.options;
+    const {
+      renderHeaderPrefix,
+      renderHeaderFilenameSuffix,
+      renderCustomHeader,
+      renderHeaderMetadata,
+    } = this.options;
 
     if (renderCustomHeader != null) {
       const content = renderCustomHeader(file) ?? undefined;
@@ -1221,17 +1395,26 @@ export class File<LAnnotation = undefined> {
         content
       );
       this.headerPrefix?.remove();
+      this.headerFilenameSuffix?.remove();
       this.headerMetadata?.remove();
       this.headerPrefix = undefined;
+      this.headerFilenameSuffix = undefined;
       this.headerMetadata = undefined;
     } else {
       const prefix = renderHeaderPrefix?.(file) ?? undefined;
+      const suffix = renderHeaderFilenameSuffix?.(file) ?? undefined;
       const content = renderHeaderMetadata?.(file) ?? undefined;
       this.headerPrefix = this.upsertHeaderSlotElement(
         container,
         this.headerPrefix,
         HEADER_PREFIX_SLOT_ID,
         prefix
+      );
+      this.headerFilenameSuffix = this.upsertHeaderSlotElement(
+        container,
+        this.headerFilenameSuffix,
+        HEADER_FILENAME_SUFFIX_SLOT_ID,
+        suffix
       );
       this.headerMetadata = this.upsertHeaderSlotElement(
         container,
@@ -1246,9 +1429,11 @@ export class File<LAnnotation = undefined> {
 
   private clearHeaderSlots(): void {
     this.headerPrefix?.remove();
+    this.headerFilenameSuffix?.remove();
     this.headerMetadata?.remove();
     this.headerCustom?.remove();
     this.headerPrefix = undefined;
+    this.headerFilenameSuffix = undefined;
     this.headerMetadata = undefined;
     this.headerCustom = undefined;
   }
@@ -1300,6 +1485,9 @@ export class File<LAnnotation = undefined> {
       previousContainer ??
       document.createElement(DIFFS_TAG_NAME);
     const containerChanged = previousContainer !== nextContainer;
+    if (previousContainer != null && containerChanged) {
+      this.editor?.__captureFocusForDOMReplacement();
+    }
     if (containerChanged) {
       this.emitPostRender(true);
     }
@@ -1379,6 +1567,7 @@ export class File<LAnnotation = undefined> {
     // If we have a new parent container for the pre element, lets go ahead and
     // move it into the new container
     else if (this.pre.parentNode !== shadowRoot) {
+      this.editor?.__captureFocusForDOMReplacement();
       container.shadowRoot?.appendChild(this.pre);
       this.appliedPreAttributes = undefined;
     }

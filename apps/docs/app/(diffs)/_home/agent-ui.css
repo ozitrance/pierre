@@ -1,0 +1,591 @@
+/* Scoped agent-UI chrome for the homepage agent-review demo. Everything lives
+   under `.aui` so it never leaks into the rest of the docs app. Colours use
+   light-dark(); the `.aui[data-theme-type]` rules pin color-scheme to the
+   demo's own toggle. The UI sits in normal page flow as a fixed-height card. */
+.aui {
+  --ide-surface: light-dark(#ffffff, #070707);
+  --ide-panel: light-dark(#f8f8f8, #0f0f10);
+  --ide-border: light-dark(rgb(0 0 0 / 0.08), rgb(255 255 255 / 0.07));
+  --ide-fg: light-dark(#18181b, #e4e4e7);
+  --ide-fg-muted: light-dark(#71717a, #a1a1aa);
+  --ide-tab-active: light-dark(#ffffff, #1c1c1f);
+  --ide-tab-hover: light-dark(rgb(0 0 0 / 0.04), rgb(255 255 255 / 0.05));
+  --ide-accent: light-dark(#2563eb, #3b82f6);
+
+  display: grid;
+  /* Single body row that fills the card. There's no separate titlebar: the
+     macOS-style traffic-light controls live inline (left of the breadcrumb in
+     the windowed card, in the explorer header in fullscreen). */
+  grid-template-rows: minmax(0, 1fr);
+  height: 560px;
+  max-height: 72vh;
+  border: 1px solid var(--ide-border);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+  background-color: var(--ide-surface);
+  color: var(--ide-fg);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  font-size: 13px;
+
+  /* Shared element for the windowed <-> fullscreen morph. Both variants render
+     a single `.aui`, so the cross-route View Transition (driven manually in
+     AgentUi.tsx) FLIP-animates this element's size/position between them. */
+  view-transition-name: aui-window;
+}
+
+.aui[data-theme-type='light'] {
+  color-scheme: light;
+}
+
+.aui[data-theme-type='dark'] {
+  color-scheme: dark;
+}
+
+/* Give the demo more room on desktop. */
+@media (width >= 1024px) {
+  .aui {
+    height: 760px;
+    max-height: 75vh;
+  }
+}
+
+.aui button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.aui code {
+  font-family: var(--font-berkeley-mono), monospace;
+  font-size: 0.9em;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background-color: var(--ide-tab-hover);
+}
+
+/* --- Window controls (traffic lights) ----------------------------------- */
+
+/* macOS traffic lights. Decorative dots are <span>s; the actionable one (green
+   in the windowed card, red/green in fullscreen) is a Link/button that drives
+   the view transition. Glyphs reveal on cluster hover like the real control.
+   The shared view-transition-name lets the cluster glide between its windowed
+   (left of breadcrumb) and fullscreen (explorer header) positions during the
+   cross-route morph. */
+.aui-traffic {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  view-transition-name: aui-traffic;
+}
+
+.aui-dot {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background-color: var(--dot);
+  box-shadow: inset 0 0 0 0.5px rgb(0 0 0 / 0.18);
+  transition: transform 0.12s ease;
+}
+
+.aui-dot.is-close {
+  --dot: #ff5f57;
+}
+
+.aui-dot.is-min {
+  --dot: #febc2e;
+}
+
+.aui-dot.is-zoom {
+  --dot: #28c840;
+}
+
+a.aui-dot,
+button.aui-dot {
+  cursor: pointer;
+}
+
+.aui-dot::after {
+  position: absolute;
+  inset: 0;
+  content: '';
+  text-align: center;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 11px;
+  color: rgb(0 0 0 / 0.6);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.aui-traffic:hover .aui-dot::after {
+  opacity: 1;
+}
+
+.aui-traffic:hover .aui-dot.is-close::after {
+  content: '\00d7';
+}
+
+.aui-traffic:hover .aui-dot.is-min::after {
+  content: '\2013';
+}
+
+.aui-traffic:hover .aui-dot.is-zoom::after {
+  content: '\002b';
+}
+
+a.aui-dot.is-zoom:hover,
+button.aui-dot.is-zoom:hover {
+  transform: scale(1.15);
+}
+
+.aui-dot:focus-visible {
+  outline: 2px solid var(--ide-accent);
+  outline-offset: 2px;
+}
+
+.aui-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  min-height: 0;
+}
+
+/* --- Center column ------------------------------------------------------- */
+
+.aui-center {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.aui-center-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 44px;
+  padding-inline: 12px;
+  border-bottom: 1px solid var(--ide-border);
+}
+
+.aui-breadcrumb {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 14px;
+  color: var(--ide-fg-muted);
+}
+
+.aui-crumb:not(:last-child)::after {
+  content: '/';
+  margin-inline: 2px;
+  opacity: 0.5;
+}
+
+.aui-crumb[data-leaf='true'] {
+  color: var(--ide-fg);
+  font-weight: 500;
+}
+
+.aui-surface-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.aui-surface {
+  display: block;
+}
+
+.aui-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--ide-fg-muted);
+}
+
+.aui-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px;
+  padding: 10px 10px 8px;
+  border: 1px solid var(--ide-border);
+  border-radius: 12px;
+  background-color: var(--ide-panel);
+}
+
+.aui-composer:focus-within {
+  border-color: var(--ide-accent);
+}
+
+/* Snippets sent from the selection action's "Add to chat" stack above the
+   composer input as removable code attachments. */
+.aui-composer-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 160px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.aui-attachment {
+  position: relative;
+  border: 1px solid var(--ide-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background-color: var(--ide-surface);
+}
+
+.aui-attachment-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 32px 0 8px;
+  border-bottom: 1px solid var(--ide-border);
+  color: var(--ide-fg-muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.aui-attachment-header svg {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+}
+
+.aui-attachment-file {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ide-fg);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aui-attachment-lines {
+  flex: 0 0 auto;
+}
+
+.aui-attachment-code {
+  display: block;
+  max-height: 132px;
+  overflow: auto;
+}
+
+.aui-attachment-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 6px;
+  background-color: color-mix(in srgb, var(--ide-surface) 70%, transparent);
+  color: var(--ide-fg-muted);
+}
+
+.aui-attachment-remove:hover {
+  background-color: var(--ide-tab-hover);
+  color: var(--ide-fg);
+}
+
+.aui-composer-input {
+  width: 100%;
+  min-height: 40px;
+  padding: 2px 4px;
+  border: none;
+  background: none;
+  color: var(--ide-fg);
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.5;
+  resize: none;
+}
+
+.aui-composer-input:focus {
+  outline: none;
+}
+
+.aui-composer-input::placeholder {
+  color: var(--ide-fg-muted);
+}
+
+.aui-composer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.aui-composer-select,
+.aui-composer-send {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  border-radius: 9px;
+  background: none;
+  color: var(--ide-fg-muted);
+
+  &[disabled] {
+    cursor: default;
+  }
+}
+
+.aui-composer-select {
+  gap: 5px;
+  height: 28px;
+  padding-inline: 8px;
+  background-color: var(--ide-tab-hover);
+  font-size: 12px;
+}
+
+.aui-composer-send {
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background-color: var(--ide-accent);
+  color: #ffffff;
+
+  &[disabled] {
+    opacity: 0.6;
+  }
+}
+
+/* --- Right changes panel ------------------------------------------------- */
+
+.aui-changes {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--ide-border);
+  background-color: var(--ide-panel);
+}
+
+.aui-changes-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 44px;
+  padding-inline: 10px;
+  border-bottom: 1px solid var(--ide-border);
+}
+
+.aui-changes-tabs button {
+  padding: 4px 10px;
+  border: none;
+  border-radius: 6px;
+  background-color: transparent;
+  color: var(--ide-fg-muted);
+  font-size: 12px;
+}
+
+.aui-changes-tabs button[aria-selected='true'] {
+  background-color: var(--ide-tab-active);
+  color: var(--ide-fg);
+}
+
+.aui-changes-tabs button[disabled] {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* Live count of changed files (formerly in the titlebar), shown as a pill on
+   the selected Changes tab. */
+.aui-changes-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  margin-left: 6px;
+  padding-inline: 5px;
+  border-radius: 999px;
+  background-color: var(--ide-tab-hover);
+  color: var(--ide-fg-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.aui-changes-tabs button[aria-selected='true'] .aui-changes-count {
+  color: var(--ide-fg);
+}
+
+.aui-tree {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-top: 6px;
+}
+
+/* --- Fullscreen variant (/edit/live) ------------------------------------- */
+
+/* The standalone route fills the viewport with no surrounding page chrome and
+   adds a full project file explorer on the left, keeping the changes panel on
+   the right — like a real editor. Higher specificity than the windowed `.aui`
+   rules (including those inside the desktop media query, since media queries
+   don't add specificity) so it wins regardless of source order. */
+.aui[data-variant='fullscreen'] {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  width: 100vw;
+  height: 100dvh;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* Three columns: the full file explorer (left), the editor (center), and the
+   existing changes panel (right, unchanged from the windowed layout). The left
+   panel only renders in the fullscreen variant, so the windowed card keeps its
+   two-column body. */
+.aui[data-variant='fullscreen'] .aui-body {
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr) 340px;
+}
+
+/* The fullscreen editor gets the breathing room of the full viewport, so widen
+   the composer's max line measure a touch via centered padding. */
+.aui[data-variant='fullscreen'] .aui-composer {
+  margin-inline: max(12px, calc((100% - 900px) / 2));
+}
+
+/* --- Left file explorer (fullscreen only) -------------------------------- */
+
+.aui-files {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--ide-border);
+  background-color: var(--ide-panel);
+}
+
+.aui-files-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding-inline: 12px 8px;
+  border-bottom: 1px solid var(--ide-border);
+}
+
+/* Window controls sit on the left; the file actions fill the rest and align
+   right. */
+.aui-files-toolbar .aui-traffic {
+  margin-right: auto;
+}
+
+.aui-files-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.aui-files-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background-color: transparent;
+  color: var(--ide-fg-muted);
+  cursor: pointer;
+}
+
+.aui-files-action svg {
+  width: 15px;
+  height: 15px;
+}
+
+.aui-files-action:hover {
+  background-color: var(--ide-tab-active);
+  color: var(--ide-fg);
+}
+
+.aui-files-action[aria-pressed='true'] {
+  background-color: var(--ide-tab-active);
+  color: var(--ide-fg);
+}
+
+.aui-files-tree {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-top: 6px;
+}
+
+/* --- Cross-route morph (View Transitions API) ---------------------------- */
+
+/* React assigns `view-transition-name: aui-window` to the `.aui` element during
+   the navigation between the windowed card and the fullscreen route, so the
+   browser FLIP-morphs its size/position. Tune the timing for an editor-window
+   "zoom" feel and cross-fade the differing contents over the same duration. */
+::view-transition-group(aui-window) {
+  animation-duration: 0.42s;
+  animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+::view-transition-old(aui-window),
+::view-transition-new(aui-window) {
+  animation-duration: 0.42s;
+  animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+::view-transition-group(aui-traffic) {
+  animation-duration: 0.42s;
+  animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(aui-window),
+  ::view-transition-old(aui-window),
+  ::view-transition-new(aui-window),
+  ::view-transition-group(aui-traffic),
+  ::view-transition-old(aui-traffic),
+  ::view-transition-new(aui-traffic) {
+    animation: none;
+  }
+}
+
+/* --- Mobile -------------------------------------------------------------- */
+
+/* On narrow screens there isn't room for the changes sidebar, so collapse to a
+   single full-width column showing just the active file. Placed last so it wins
+   over the base `.aui-body`/`.aui-changes` rules above (media queries don't add
+   specificity). */
+@media (width < 640px) {
+  .aui-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .aui-changes {
+    display: none;
+  }
+
+  /* The fullscreen route is a file navigator first, so keep the explorer on the
+     left even when there's no room for it in the embedded windowed card; the
+     changes panel stays hidden at this width. */
+  .aui[data-variant='fullscreen'] .aui-body {
+    grid-template-columns: minmax(0, 44%) minmax(0, 1fr);
+  }
+}

@@ -50,7 +50,7 @@ export interface UnresolvedFileReactOptions<LAnnotation>
 
 export interface UnresolvedFileProps<LAnnotation> extends Omit<
   FileDiffProps<LAnnotation>,
-  'fileDiff' | 'options'
+  'fileDiff' | 'options' | 'edit' | 'editorOptions'
 > {
   file: FileContents;
   options?: UnresolvedFileReactOptions<LAnnotation>;
@@ -72,6 +72,7 @@ export function UnresolvedFile<LAnnotation = undefined>({
   renderAnnotation,
   renderCustomHeader,
   renderHeaderPrefix,
+  renderHeaderFilenameSuffix,
   renderHeaderMetadata,
   renderGutterUtility,
   renderMergeConflictUtility,
@@ -93,6 +94,7 @@ export function UnresolvedFile<LAnnotation = undefined>({
     fileDiff,
     renderCustomHeader,
     renderHeaderPrefix,
+    renderHeaderFilenameSuffix,
     renderHeaderMetadata,
     renderAnnotation,
     renderGutterUtility,

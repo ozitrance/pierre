@@ -13,7 +13,9 @@ export const FILE_CONTENTS_TYPE: PreloadFileOptions<undefined> = {
     name: 'FileContents.ts',
     contents: `import type { FileContents } from '@pierre/diffs';
 
-// FileContents represents a single file
+// FileContents represents one existing file side.
+// Use null, not FileContents with an empty string, for an intentionally
+// missing side.
 interface FileContents {
   // The filename (used for display and language detection)
   name: string;
@@ -25,10 +27,9 @@ interface FileContents {
   // See: https://shiki.style/languages
   lang?: SupportedLanguages;
 
-  // Optional: Cache key for AST caching in Worker Pool.
-  // When provided, rendered AST results are cached and reused.
-  // IMPORTANT: The key must change whenever the content, filename
-  // or lang changes!
+  // Optional identity for Worker Pool caching. Required when
+  // Editor.persistState is enabled; use a unique, stable key for that editing
+  // session and reuse it only when the cached document should resume.
   cacheKey?: string;
 }
 
@@ -37,7 +38,7 @@ const file: FileContents = {
   // We'll attempt to detect the language based on file extension
   name: 'example.tsx',
   contents: 'export function Hello() { return <div>Hello</div>; }',
-  cacheKey: 'example-file-v1', // Must change if contents change
+  cacheKey: 'example-file-v1',
 };
 
 // With explicit language override
@@ -57,7 +58,7 @@ export const FILE_DIFF_METADATA_TYPE: PreloadFileOptions<undefined> = {
     name: 'FileDiffMetadata.ts',
     contents: `import type { FileDiffMetadata, Hunk } from '@pierre/diffs';
 
-// FileDiffMetadata represents the differences between two files
+// FileDiffMetadata represents a parsed file change.
 interface FileDiffMetadata {
   // Current filename
   name: string;
@@ -138,6 +139,40 @@ interface ChangeContent {
   options,
 };
 
+export const LINE_ANNOTATION_TYPES: PreloadFileOptions<undefined> = {
+  file: {
+    name: 'line_annotations.ts',
+    contents: `import type {
+  DiffLineAnnotation,
+  LineAnnotation,
+} from '@pierre/diffs';
+
+interface ThreadMetadata {
+  // Position-independent identity for application-owned state.
+  id: string;
+}
+
+const fileAnnotations: LineAnnotation<ThreadMetadata>[] = [
+  { lineNumber: 0, metadata: { id: 'file-summary' } },
+  { lineNumber: 5, metadata: { id: 'line-five-review' } },
+];
+
+const diffAnnotations: DiffLineAnnotation<ThreadMetadata>[] = [
+  {
+    side: 'additions',
+    lineNumber: 12,
+    metadata: { id: 'new-line-review' },
+  },
+  {
+    side: 'deletions',
+    lineNumber: 9,
+    metadata: { id: 'old-line-review' },
+  },
+];`,
+  },
+  options,
+};
+
 export const PARSE_DIFF_FROM_FILE_EXAMPLE: PreloadFileOptions<undefined> = {
   file: {
     name: 'parseDiffFromFile.ts',
@@ -147,7 +182,7 @@ export const PARSE_DIFF_FROM_FILE_EXAMPLE: PreloadFileOptions<undefined> = {
   type FileDiffMetadata,
 } from '@pierre/diffs';
 
-// Define your two file versions
+// Define the existing file versions
 const oldFile: FileContents = {
   name: 'greeting.ts',
   contents: 'export const greeting = "Hello";',
@@ -160,12 +195,19 @@ const newFile: FileContents = {
   cacheKey: 'greeting-new',
 };
 
-// Generate the diff metadata
+// Generate diff metadata from two existing versions
 const diff: FileDiffMetadata = parseDiffFromFile(oldFile, newFile);
+
+// For added or deleted files, pass null for the side that does not exist.
+// Omitting the side is not the same as passing null.
+const addedFileDiff = parseDiffFromFile(null, newFile);
+const deletedFileDiff = parseDiffFromFile(oldFile, null);
+
+// parseDiffFromFile(null, null) throws because at least one side must exist.
 
 // The resulting diff includes oldLines and newLines,
 // which enables "expand unchanged" functionality in the UI.
-// If both files have cacheKey, the diff will have a combined
+// If both existing versions have cacheKey, the diff will have a combined
 // cacheKey of "greeting-old:greeting-new" for AST caching.`,
   },
   options,
@@ -200,8 +242,9 @@ const files: FileDiffMetadata[] = patches[0].files;
 // "my-patch-1", etc.
 // This enables AST caching in Worker Pool for parsed patches.
 
-// Note: Diffs from patch files don't include oldLines/newLines,
-// so "expand unchanged" won't work unless you add them manually`,
+// Note: Diffs from patch files don't include oldLines/newLines.
+// Renderers can hydrate them with loadDiffFiles when full file
+// contents are needed for expanding unchanged context.`,
   },
   options,
 };

@@ -1,11 +1,13 @@
 import { afterAll, describe, expect, test } from 'bun:test';
+import { createTwoFilesPatch } from 'diff';
 
 import {
   DiffHunksRenderer,
   disposeHighlighter,
   parseDiffFromFile,
+  parsePatchFiles,
 } from '../src';
-import type { FileDiffMetadata } from '../src/types';
+import type { FileDiffLoadedFiles, FileDiffMetadata } from '../src/types';
 import { mockDiffs } from './mocks';
 import {
   assertDefined,
@@ -19,6 +21,11 @@ import {
 afterAll(async () => {
   await disposeHighlighter();
 });
+
+const loadedFiles: FileDiffLoadedFiles = {
+  oldFile: { name: 'file.ts', contents: 'const oldValue = 1;\n' },
+  newFile: { name: 'file.ts', contents: 'const newValue = 2;\n' },
+};
 
 function countInlineDiffSpans(
   result: Awaited<ReturnType<DiffHunksRenderer['asyncRender']>>
@@ -54,6 +61,76 @@ function changeBlockSurpluses(diff: FileDiffMetadata): {
     }
   }
   return { additionsColumn, deletionsColumn };
+}
+
+function parsePartialDiffWithCollapsedContext(): FileDiffMetadata {
+  const oldFile = {
+    name: 'partial.txt',
+    contents: ['keep 1\n', 'old value\n', 'keep 3\n'].join(''),
+  };
+  const newFile = {
+    name: 'partial.txt',
+    contents: ['keep 1\n', 'new value\n', 'keep 3\n'].join(''),
+  };
+  const file = parsePatchFiles(
+    createTwoFilesPatch(
+      oldFile.name,
+      newFile.name,
+      oldFile.contents,
+      newFile.contents,
+      undefined,
+      undefined,
+      { context: 0 }
+    ),
+    'partial',
+    true
+  )[0]?.files[0];
+  assertDefined(file, 'expected patch to contain one file');
+  expect(file.isPartial).toBe(true);
+  expect(file.hunks[0]?.collapsedBefore).toBeGreaterThan(0);
+  return file;
+}
+
+function parsePartialNewFile(): FileDiffMetadata {
+  const file = parsePatchFiles(
+    [
+      'diff --git a/created.txt b/created.txt\n',
+      'new file mode 100644\n',
+      'index 0000000..1234567\n',
+      '--- /dev/null\n',
+      '+++ b/created.txt\n',
+      '@@ -0,0 +1,2 @@\n',
+      '+added 1\n',
+      '+added 2\n',
+    ].join(''),
+    'partial-created',
+    true
+  )[0]?.files[0];
+  assertDefined(file, 'expected created patch to contain one file');
+  expect(file.isPartial).toBe(true);
+  expect(file.type).toBe('new');
+  return file;
+}
+
+function parsePartialDeletedFile(): FileDiffMetadata {
+  const file = parsePatchFiles(
+    [
+      'diff --git a/deleted.txt b/deleted.txt\n',
+      'deleted file mode 100644\n',
+      'index 1234567..0000000\n',
+      '--- a/deleted.txt\n',
+      '+++ /dev/null\n',
+      '@@ -1,2 +0,0 @@\n',
+      '-deleted 1\n',
+      '-deleted 2\n',
+    ].join(''),
+    'partial-deleted',
+    true
+  )[0]?.files[0];
+  assertDefined(file, 'expected deleted patch to contain one file');
+  expect(file.isPartial).toBe(true);
+  expect(file.type).toBe('deleted');
+  return file;
 }
 
 describe('DiffHunksRenderer', () => {
@@ -137,6 +214,50 @@ describe('DiffHunksRenderer', () => {
       additions: rowDigests(additionRows),
       deletions: rowDigests(deletionRows),
     }).toMatchSnapshot('rendered rows');
+  });
+
+  test('an insert block above a paired change keeps split columns aligned', async () => {
+    // Realignment splits "blank line inserted above an edited line" into an
+    // addition-only block directly followed by a paired block. The renderer
+    // must flush the pending deletion-side buffer before the paired block's
+    // deletion row, so the buffer renders above it and the columns stay
+    // index-parallel.
+    const instance = new DiffHunksRenderer(mockDiffs.diffRowBufferTest.options);
+    const context = 'alpha\nbravo\ncharlie\ndelta\n';
+    const diff = parseDiffFromFile(
+      {
+        name: 'a.ts',
+        contents: `${context}const value = compute();\n${context}`,
+      },
+      {
+        name: 'a.ts',
+        contents: `${context}\nconst value = computed();\n${context}`,
+      }
+    );
+    expect(verifyHunkLineValues(diff)).toEqual([]);
+    const result = await instance.asyncRender(diff);
+    assertDefined(
+      result.deletionsContentAST,
+      'result.deletionsContentAST should be defined'
+    );
+    assertDefined(
+      result.additionsContentAST,
+      'result.additionsContentAST should be defined'
+    );
+
+    const deletionRows = projectColumn(result.deletionsContentAST);
+    const additionRows = projectColumn(result.additionsContentAST);
+    // The deletion column renders the gap above the paired old line.
+    const bufferIndex = deletionRows.findIndex((row) => row.kind === 'buffer');
+    const deletionLineIndex = deletionRows.findIndex((row) =>
+      rowDigests([row])[0].includes('const value = compute();')
+    );
+    expect(bufferIndex).toBeGreaterThan(-1);
+    expect(deletionLineIndex).toBe(bufferIndex + 1);
+    // Both columns cover the same rendered rows.
+    const rowSpan = (rows: ReturnType<typeof projectColumn>) =>
+      rows.reduce((total, row) => total + (row.bufferSize ?? 1), 0);
+    expect(rowSpan(deletionRows)).toBe(rowSpan(additionRows));
   });
 
   test('additions and deletions should be empty when unified', async () => {
@@ -227,6 +348,106 @@ describe('DiffHunksRenderer', () => {
     const result = await instance.asyncRender(diff);
     const html = instance.renderFullHTML(result);
     expect(html).not.toContain('data-container-size');
+  });
+
+  test('keeps partial hunk separators non-expandable without a file loader', async () => {
+    const instance = new DiffHunksRenderer({ hunkSeparators: 'line-info' });
+    const result = await instance.asyncRender(
+      parsePartialDiffWithCollapsedContext()
+    );
+
+    expect(result.hunkData.length).toBeGreaterThan(0);
+    expect(result.hunkData.every((hunk) => hunk.expandable == null)).toBe(true);
+  });
+
+  test('marks partial hunk separators expandable with a file loader', async () => {
+    const instance = new DiffHunksRenderer({
+      hunkSeparators: 'line-info',
+      loadDiffFiles: () => Promise.resolve(loadedFiles),
+    });
+    const result = await instance.asyncRender(
+      parsePartialDiffWithCollapsedContext()
+    );
+
+    expect(result.hunkData.length).toBeGreaterThan(0);
+    expect(result.hunkData.every((hunk) => hunk.expandable != null)).toBe(true);
+  });
+
+  test('renders synthetic bottom separator for partial diffs with a file loader', async () => {
+    const diff = parsePartialDiffWithCollapsedContext();
+    const instance = new DiffHunksRenderer({
+      diffStyle: 'unified',
+      hunkSeparators: 'line-info',
+      loadDiffFiles: () => Promise.resolve(loadedFiles),
+    });
+    const result = await instance.asyncRender(diff);
+    const html = instance.renderFullHTML(result);
+    const tailHunkData = result.hunkData.find(
+      (hunk) => hunk.hunkIndex === diff.hunks.length
+    );
+
+    expect(tailHunkData).toEqual({
+      slotName: `hunk-separator-unified-${diff.hunks.length}`,
+      hunkIndex: diff.hunks.length,
+      lines: 0,
+      lineCountKnown: false,
+      type: 'unified',
+      expandable: { up: true, down: false, chunked: false },
+    });
+    expect(html).toContain('More unchanged context may be available');
+    expect(html).toContain(`data-expand-index="${diff.hunks.length}"`);
+    expect(html).not.toContain('0 unmodified lines');
+  });
+
+  test('does not render synthetic bottom separator for partial diffs without a file loader', async () => {
+    const diff = parsePartialDiffWithCollapsedContext();
+    const instance = new DiffHunksRenderer({
+      diffStyle: 'unified',
+      hunkSeparators: 'line-info',
+    });
+    const result = await instance.asyncRender(diff);
+    const html = instance.renderFullHTML(result);
+
+    expect(
+      result.hunkData.some((hunk) => hunk.hunkIndex === diff.hunks.length)
+    ).toBe(false);
+    expect(html).not.toContain('More unchanged context may be available');
+  });
+
+  test('does not render synthetic bottom separator for partial new files with a file loader', async () => {
+    const diff = parsePartialNewFile();
+    const instance = new DiffHunksRenderer({
+      diffStyle: 'unified',
+      hunkSeparators: 'line-info',
+      loadDiffFiles: () => Promise.resolve(loadedFiles),
+    });
+    const result = await instance.asyncRender(diff);
+    const html = instance.renderFullHTML(result);
+
+    expect(
+      result.hunkData.some((hunk) => hunk.hunkIndex === diff.hunks.length)
+    ).toBe(false);
+    expect(result.hunkData.every((hunk) => hunk.expandable == null)).toBe(true);
+    expect(html).not.toContain('More unchanged context may be available');
+    expect(html).not.toContain(`data-expand-index="${diff.hunks.length}"`);
+  });
+
+  test('does not render synthetic bottom separator for partial deleted files with a file loader', async () => {
+    const diff = parsePartialDeletedFile();
+    const instance = new DiffHunksRenderer({
+      diffStyle: 'unified',
+      hunkSeparators: 'line-info',
+      loadDiffFiles: () => Promise.resolve(loadedFiles),
+    });
+    const result = await instance.asyncRender(diff);
+    const html = instance.renderFullHTML(result);
+
+    expect(
+      result.hunkData.some((hunk) => hunk.hunkIndex === diff.hunks.length)
+    ).toBe(false);
+    expect(result.hunkData.every((hunk) => hunk.expandable == null)).toBe(true);
+    expect(html).not.toContain('More unchanged context may be available');
+    expect(html).not.toContain(`data-expand-index="${diff.hunks.length}"`);
   });
 
   test('skips inline diff decorations for changed lines above maxLineDiffLength', async () => {

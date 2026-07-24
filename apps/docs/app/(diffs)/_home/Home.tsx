@@ -29,6 +29,8 @@ import { SPLIT_UNIFIED } from '../_examples/SplitUnified/constants';
 import { SplitUnified } from '../_examples/SplitUnified/SplitUnified';
 import { TOKEN_HOVER_EXAMPLE } from '../_examples/TokenHover/constants';
 import { TokenHover } from '../_examples/TokenHover/TokenHover';
+import { AgentDemoSection } from './AgentDemoSection';
+import { preloadAuiPrerenderedDiffs } from './preloadAuiDiffs';
 import { HeadingAnchors } from '@/components/docs/HeadingAnchors';
 import Footer from '@/components/Footer';
 import { Header } from '@/components/Header';
@@ -37,7 +39,6 @@ import { PierreCompanySection } from '@/components/PierreCompanySection';
 import type { ProductId } from '@/lib/product-config';
 
 const PRODUCT_ID: ProductId = 'diffs';
-
 export default function Home() {
   return (
     <WorkerPoolContext>
@@ -46,23 +47,36 @@ export default function Home() {
         <Hero productId={PRODUCT_ID} />
         <HeadingAnchors />
         <section className="space-y-12 pb-8">
+          <EditSection />
           <SplitUnifiedSection />
-          <ShikiThemesSection />
           <DiffStylesSection />
-          <FontStylesSection />
-          <CustomHunkSeparatorsSection />
-          <CustomHeaderSection />
           <MergeConflictSection />
           <AnnotationsSection />
           <AcceptRejectSection />
           <LineSelectionSection />
           <TokenHoverSection />
+
+          <hr />
+
+          <ShikiThemesSection />
+          <FontStylesSection />
+          <CustomHunkSeparatorsSection />
+          <CustomHeaderSection />
           <ArbitraryFilesSection />
         </section>
         <PierreCompanySection />
         <Footer />
       </div>
     </WorkerPoolContext>
+  );
+}
+
+// Server-renders the embedded editor demo's diffs. We pick the live AUI
+// session and prerender each changed file's diff with the demo's default dark
+// theme so the card paints highlighted on first load and hydrates cleanly.
+async function EditSection() {
+  return (
+    <AgentDemoSection prerenderedDiffs={await preloadAuiPrerenderedDiffs()} />
   );
 }
 

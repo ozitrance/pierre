@@ -20,8 +20,8 @@ import { VirtualizedFileDiff } from '../src/components/VirtualizedFileDiff';
 import type { Virtualizer } from '../src/components/Virtualizer';
 import { DEFAULT_VIRTUAL_FILE_METRICS } from '../src/constants';
 import type { FileContents, FileDiffMetadata } from '../src/types';
+import { linesFromFileContents } from '../src/utils/computeFileOffsets';
 import { parseDiffFromFile } from '../src/utils/parseDiffFromFile';
-import { splitFileContents } from '../src/utils/splitFileContents';
 import { assertDefined } from './testUtils';
 
 function installDomConstructors() {
@@ -165,6 +165,18 @@ class SpyUnresolvedFile extends UnresolvedFile {
   }
 }
 
+class InspectableVirtualizedFileDiff extends VirtualizedFileDiff {
+  public getCachedFiles(): {
+    deletionFile: FileContents | null | undefined;
+    additionFile: FileContents | null | undefined;
+  } {
+    return {
+      deletionFile: this.deletionFile,
+      additionFile: this.additionFile,
+    };
+  }
+}
+
 function createVirtualizer() {
   let connectCalls = 0;
   const virtualizer = {
@@ -197,8 +209,8 @@ function createVirtualizer() {
 
 // Mirrors the virtualized placeholder height estimate for the default options
 // used in these tests: the header region (diffHeaderHeight with no top padding
-// because the file header is enabled), one lineHeight per content row, and the
-// bottom padding (spacing).
+// because the file header is enabled), one lineHeight per renderer line, and
+// the bottom padding (spacing).
 function getExpectedPlaceholderHeight(rowCount: number): string {
   const { diffHeaderHeight, lineHeight, spacing } =
     DEFAULT_VIRTUAL_FILE_METRICS;
@@ -329,7 +341,9 @@ describe('collapsed hydration', () => {
         'expected hydration to render a placeholder for the off-screen file'
       );
       expect(placeholderHeight).toBe(
-        getExpectedPlaceholderHeight(splitFileContents(file.contents).length)
+        getExpectedPlaceholderHeight(
+          linesFromFileContents(file.contents).length
+        )
       );
     } finally {
       dom.cleanup();
@@ -426,6 +440,101 @@ describe('collapsed hydration', () => {
       expect(placeholderHeight).toBe(
         getExpectedPlaceholderHeight(
           parseDiffFromFile(file, modifiedFile).splitLineCount
+        )
+      );
+    } finally {
+      dom.cleanup();
+    }
+  });
+
+  test('VirtualizedFileDiff preserves cached files during off-screen placeholder rerenders', () => {
+    const dom = installDomConstructors();
+    try {
+      const virtualizerState = createVirtualizer();
+      const instance = new InspectableVirtualizedFileDiff(
+        undefined,
+        virtualizerState.virtualizer
+      );
+      const fileContainer = dom.createHydrationContainer();
+
+      instance.hydrate({
+        oldFile: file,
+        newFile: modifiedFile,
+        fileContainer,
+      });
+
+      expect(instance.render()).toBe(true);
+      const cachedFiles = instance.getCachedFiles();
+      expect(cachedFiles.deletionFile).toBe(file);
+      expect(cachedFiles.additionFile).toBe(modifiedFile);
+    } finally {
+      dom.cleanup();
+    }
+  });
+
+  test('VirtualizedFileDiff hydrates a new file from an explicit missing oldFile side', () => {
+    const dom = installDomConstructors();
+    try {
+      const virtualizerState = createVirtualizer();
+      const instance = new VirtualizedFileDiff(
+        undefined,
+        virtualizerState.virtualizer
+      );
+      const fileContainer = dom.createHydrationContainer();
+      const props: FileDiffHydrationProps<undefined> = {
+        oldFile: null,
+        newFile: modifiedFile,
+        fileContainer,
+      };
+
+      instance.hydrate(props);
+
+      expect(instance.fileDiff?.type).toBe('new');
+      expect(instance.fileDiff?.isPartial).toBe(false);
+      expect(virtualizerState.connectCalls).toBe(1);
+      const placeholderHeight = getPlaceholderHeight(fileContainer);
+      assertDefined(
+        placeholderHeight,
+        'expected hydration to render a placeholder for the off-screen new file diff'
+      );
+      expect(placeholderHeight).toBe(
+        getExpectedPlaceholderHeight(
+          parseDiffFromFile(null, modifiedFile).splitLineCount
+        )
+      );
+    } finally {
+      dom.cleanup();
+    }
+  });
+
+  test('VirtualizedFileDiff hydrates a deleted file from an explicit missing newFile side', () => {
+    const dom = installDomConstructors();
+    try {
+      const virtualizerState = createVirtualizer();
+      const instance = new VirtualizedFileDiff(
+        undefined,
+        virtualizerState.virtualizer
+      );
+      const fileContainer = dom.createHydrationContainer();
+      const props: FileDiffHydrationProps<undefined> = {
+        oldFile: file,
+        newFile: null,
+        fileContainer,
+      };
+
+      instance.hydrate(props);
+
+      expect(instance.fileDiff?.type).toBe('deleted');
+      expect(instance.fileDiff?.isPartial).toBe(false);
+      expect(virtualizerState.connectCalls).toBe(1);
+      const placeholderHeight = getPlaceholderHeight(fileContainer);
+      assertDefined(
+        placeholderHeight,
+        'expected hydration to render a placeholder for the off-screen deleted file diff'
+      );
+      expect(placeholderHeight).toBe(
+        getExpectedPlaceholderHeight(
+          parseDiffFromFile(file, null).splitLineCount
         )
       );
     } finally {
