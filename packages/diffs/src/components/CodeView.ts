@@ -2224,7 +2224,10 @@ export class CodeView<LAnnotation = undefined> {
     const prototype = {} as FileDiffOptions<LAnnotation>;
 
     for (const key of CODE_VIEW_DIFF_OPTION_KEYS) {
-      if (CODE_VIEW_EDIT_FORCED_OPTION_KEYS.has(key)) {
+      if (
+        CODE_VIEW_EDIT_FORCED_OPTION_KEYS.has(key) ||
+        key === 'expandUnchanged'
+      ) {
         continue;
       }
       defineItemOption<FileDiffOptions<LAnnotation>, CodeViewDiffOptionKeys>(
@@ -2252,6 +2255,16 @@ export class CodeView<LAnnotation = undefined> {
       'hunkSeparators',
       () => this.options.hunkSeparators
     );
+    defineItemOption(prototype, 'expandUnchanged', (receiver) => {
+      const state = getItemOptionsState(receiver);
+      if (state == null) {
+        return this.options.expandUnchanged;
+      }
+      return (
+        this.getItemOptions(state, 'diff')?.item.expandUnchanged ??
+        this.options.expandUnchanged
+      );
+    });
     defineItemOption(prototype, 'collapsed', (receiver) => {
       const state = getItemOptionsState(receiver);
       if (state == null) {

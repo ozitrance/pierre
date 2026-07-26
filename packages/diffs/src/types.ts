@@ -572,6 +572,11 @@ export type CodeViewDiffItem<T = undefined> = {
   version?: number;
   collapsed?: boolean;
   /**
+   * Overrides the CodeView-level `expandUnchanged` option for this item.
+   * Bump `version` when changing it so the virtualized layout is recomputed.
+   */
+  expandUnchanged?: boolean;
+  /**
    * Put this item into edit mode. Requires `EditProvider` in React or the
    * CodeView `createEditor` option in vanilla; ignored while `collapsed` is
    * true. Make sure you bump the version when also changing the value.
