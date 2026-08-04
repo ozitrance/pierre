@@ -56,9 +56,11 @@ import {
 import { getFileRendererOptions } from '../utils/getFileRendererOptions';
 import { getLineAnnotationName } from '../utils/getLineAnnotationName';
 import { getOrCreateCodeNode } from '../utils/getOrCreateCodeNode';
+import { guardWebKitScrollDuringRebuild } from '../utils/guardWebKitScrollDuringRebuild';
 import { upsertHostThemeStyle } from '../utils/hostTheme';
 import { isFilePlainText } from '../utils/isFilePlainText';
 import { isStyleNode } from '../utils/isStyleNode';
+import { isSafari } from '../utils/platform';
 import { prerenderHTMLIfNecessary } from '../utils/prerenderHTMLIfNecessary';
 import { getMeasuredScrollbarGutter } from '../utils/scrollbarGutter';
 import { setPreNodeProperties } from '../utils/setWrapperNodeProps';
@@ -310,6 +312,10 @@ export class File<
     }
   }
 
+  public __getEffectiveCodeOptions(): BaseCodeOptions {
+    return { ...this.options, ...this.fileRenderer.getEffectiveCodeOptions() };
+  }
+
   public flushManagers(): void {
     if (!this.managersDirty || this.pre == null) {
       this.managersDirty = false;
@@ -353,6 +359,7 @@ export class File<
     }
     this.clearAuxiliaryNodes();
     this.pre = undefined;
+    this.code = undefined;
     this.bufferBefore?.remove();
     this.bufferBefore = undefined;
     this.bufferAfter?.remove();
@@ -370,6 +377,7 @@ export class File<
     }
     this.errorWrapper?.remove();
     this.errorWrapper = undefined;
+    this.spriteSVG = undefined;
     this.themeCSSStyle = undefined;
     this.appliedThemeCSS = undefined;
     this.hasAdoptedThemeCSS = false;
@@ -377,7 +385,6 @@ export class File<
     this.appliedUnsafeCSS = undefined;
     this.placeHolder?.remove();
     this.placeHolder = undefined;
-    this.unsafeCSSStyle = undefined;
 
     if (recycle) {
       this.fileRenderer.recycle();
@@ -547,6 +554,7 @@ export class File<
   public attachEditor(editor: DiffsEditor<LAnnotation>): () => void {
     this.editor?.cleanUp();
     this.editor = editor;
+    this.fileRenderer.beginEditSession();
     const preparedFile =
       this.file == null ? undefined : editor.__prepareFile?.(this.file);
     if (preparedFile !== undefined && preparedFile !== this.file) {
@@ -556,11 +564,17 @@ export class File<
         preventEmit: true,
         renderRange: this.renderRange,
       });
-    } else {
+    } else if (this.fileRenderer.editorRenderReady()) {
       this.syncRenderViewToEditor();
+    } else {
+      // The current markup is missing the editor's token metadata, or its
+      // highlight is still pending: render through the session, which also
+      // syncs the render view once it paints.
+      this.rerender();
     }
     return () => {
       this.editor = undefined;
+      this.fileRenderer.endEditSession();
     };
   }
 
@@ -583,9 +597,16 @@ export class File<
 
   public updateRenderCache(
     dirtyLines: Map<number, Array<HighlightedToken>>,
-    themeType: 'dark' | 'light'
+    themeType: 'dark' | 'light',
+    options?: {
+      lineCountChangeInFlight?: boolean;
+    }
   ): void {
-    this.fileRenderer.updateRenderCache(dirtyLines, themeType);
+    this.fileRenderer.updateRenderCache(
+      dirtyLines,
+      themeType,
+      options?.lineCountChangeInFlight
+    );
   }
 
   public render(props: FileRenderProps<LAnnotation>): boolean {
@@ -737,12 +758,14 @@ export class File<
 
       this.applyBuffers(pre, nextRenderRange);
       this.injectUnsafeCSS();
+      this.renderAnnotations();
+      this.renderGutterUtility();
+
       this.managersDirty = true;
       if (!deferManagers) {
         this.flushManagers();
       }
-      this.renderAnnotations();
-      this.renderGutterUtility();
+
       if (this.editor != null) {
         this.syncRenderViewToEditor();
       }
@@ -847,36 +870,43 @@ export class File<
     return true;
   }
 
-  public primeHighlightCache(): void {
-    const { file, workerManager } = this;
+  public async primeHighlightCache(
+    file: FileContents | undefined = this.file
+  ): Promise<void> {
+    const { workerManager } = this;
     if (
       file == null ||
-      file.cacheKey == null ||
       workerManager == null ||
+      !workerManager.isWorkingPool() ||
+      file.cacheKey == null ||
       isFilePlainText(file)
     ) {
       return;
     }
+    const tokenizeMaxLength =
+      this.options.tokenizeMaxLength ?? DEFAULT_TOKENIZE_MAX_LENGTH;
     const lines = this.fileRenderer.getOrCreateLineCache(file);
-    if (
-      lines.length >
-      (this.options.tokenizeMaxLength ?? DEFAULT_TOKENIZE_MAX_LENGTH)
-    ) {
+    if (lines.length > tokenizeMaxLength) {
       return;
     }
-    void workerManager.primeFileHighlightCache(file).catch(() => undefined);
+
+    await workerManager
+      .primeFileHighlightCache(file)
+      .catch((error: unknown) => {
+        console.error(error);
+      });
   }
 
   private cleanChildNodes() {
     this.resizeManager.cleanUp();
     this.interactionManager.cleanUp();
+    this.clearAuxiliaryNodes();
 
     this.bufferAfter?.remove();
     this.bufferBefore?.remove();
     this.code?.remove();
     this.errorWrapper?.remove();
     this.headerElement?.remove();
-    this.gutterUtilityContent?.remove();
     this.headerPrefix?.remove();
     this.headerFilenameSuffix?.remove();
     this.headerMetadata?.remove();
@@ -891,7 +921,6 @@ export class File<
     this.code = undefined;
     this.errorWrapper = undefined;
     this.headerElement = undefined;
-    this.gutterUtilityContent = undefined;
     this.headerPrefix = undefined;
     this.headerFilenameSuffix = undefined;
     this.headerMetadata = undefined;
@@ -1072,23 +1101,39 @@ export class File<
     );
   }
 
+  // A boolean check to ensure that edit mode in WebKit doesn't cause potential
+  // scroll jumps to due bugs with WebKit. The workarounds have performance
+  // implications so we avoid running the workarounds on browsers or scenarios
+  // where they are not applicable
+  protected shouldGuardRebuildScroll(): boolean {
+    return this.editor != null && isSafari();
+  }
+
   private applyFullRender(result: FileRenderResult, pre: HTMLPreElement): void {
     this.cleanupErrorWrapper();
     this.applyPreNodeAttributes(pre, result);
-    this.code = getOrCreateCodeNode({ code: this.code });
+    const code = (this.code = getOrCreateCodeNode({ code: this.code }));
     const codeAst = this.fileRenderer.renderCodeAST(result);
-    if (this.code.childElementCount >= 2) {
-      for (let i = 0; i < 2; i++) {
-        const domEl = this.code.children[i] as HTMLElement;
-        const astEl = codeAst[i] as HASTElement;
-        domEl.innerHTML = toHtml(astEl.children);
-        domEl.style.cssText = astEl.properties.style as string;
+    this.editor?.__captureFocusForDOMReplacement();
+    const applyColumns = () => {
+      if (code.childElementCount >= 2) {
+        for (let i = 0; i < 2; i++) {
+          const domEl = code.children[i] as HTMLElement;
+          const astEl = codeAst[i] as HASTElement;
+          domEl.innerHTML = toHtml(astEl.children);
+          domEl.style.cssText = astEl.properties.style as string;
+        }
+      } else {
+        code.innerHTML = toHtml(codeAst);
       }
+      if (!pre.contains(code)) {
+        pre.replaceChildren(code);
+      }
+    };
+    if (this.shouldGuardRebuildScroll()) {
+      guardWebKitScrollDuringRebuild(pre, applyColumns);
     } else {
-      this.code.innerHTML = toHtml(codeAst);
-    }
-    if (!pre.contains(this.code)) {
-      pre.replaceChildren(this.code);
+      applyColumns();
     }
     this.lastRowCount = result.rowCount;
   }
@@ -1127,7 +1172,7 @@ export class File<
       !this.trimDOMToOverlap(columns.gutter, overlapStart, overlapEnd) ||
       !this.trimDOMToOverlap(columns.content, overlapStart, overlapEnd)
     ) {
-      return false;
+      throw new Error('File.applyPartialRender: failed to trim to overlap');
     }
 
     let { length: rowCount } = columns.content.children;

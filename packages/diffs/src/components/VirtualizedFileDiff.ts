@@ -1024,28 +1024,28 @@ export class VirtualizedFileDiff<
     newLineAnnotations?: DiffLineAnnotation<LAnnotation>[],
     shouldUpdateBuffer = false
   ): void {
-    const previousRenderRange = this.renderRange;
-
+    const { renderRange: previousRenderRange } = this;
+    // Capture the scroll anchor before the synchronous hunk rebuild and
+    // measured-height wipe below; the host's next frame resolves it against
+    // the new geometry so on-screen rows do not shift.
+    this.getAdvancedVirtualizer()?.capturePendingLayoutAnchor();
     super.applyDocumentChange(textDocument, newLineAnnotations);
-
     this.getSimpleVirtualizer()?.markDOMDirty();
     this.resetLayoutCache({
       forceSimpleRecompute: this.isSimpleMode(),
       includeEstimatedHeights: true,
       resetRenderRange: false,
     });
+
     if (!this.isSimpleMode()) {
       this.computeApproximateSize(true);
-    }
-
-    // Recompute the buffer spacer when the edit grew the document below the
-    // rendered window so scroll/caret positioning stays correct before the next
-    // virtualizer re-sync.
-    if (
+    } else if (
       shouldUpdateBuffer &&
       previousRenderRange !== undefined &&
       this.fileDiff !== undefined
     ) {
+      // Update the buffers caused by the line-count change to ensure the host
+      // scrolls to the correct position before re-rendering.
       const windowSpecs = this.virtualizer.getWindowSpecs();
       const renderRange = this.computeRenderRangeFromWindow(
         this.fileDiff,
@@ -1056,6 +1056,9 @@ export class VirtualizedFileDiff<
         this.updateBuffers(renderRange);
       }
     }
+
+    this.forceRenderOverride = true;
+    this.virtualizer.instanceChanged(this, true);
   }
 
   // Compute the approximate size from the cached baseline estimate plus any
@@ -1255,6 +1258,7 @@ export class VirtualizedFileDiff<
     } else {
       this.top ??= this.getVirtualizedTop();
       if (targetChanged) {
+        this.getSimpleVirtualizer()?.markDOMDirty();
         this.computeApproximateSize(false, nextFileDiff);
       }
     }
@@ -1309,6 +1313,12 @@ export class VirtualizedFileDiff<
     return this.isAdvancedMode() || super.shouldDisableVirtualizationBuffers();
   }
 
+  // This WebKit dom manipulation scroll fix is not applicable in virtualized
+  // environments, so we avoid the performance hit even on Webkit
+  protected override shouldGuardRebuildScroll(): boolean {
+    return false;
+  }
+
   private isSimpleMode(): boolean {
     return this.virtualizer.type === 'simple';
   }
@@ -1317,7 +1327,7 @@ export class VirtualizedFileDiff<
     return this.virtualizer.type === 'advanced';
   }
 
-  private getVirtualizedTop(): number | undefined {
+  private getVirtualizedTop(): number {
     if (this.virtualizer.type === 'advanced') {
       return this.virtualizer.getLocalTopForInstance(this);
     }
@@ -1328,6 +1338,10 @@ export class VirtualizedFileDiff<
 
   private getSimpleVirtualizer(): Virtualizer | undefined {
     return this.virtualizer.type === 'simple' ? this.virtualizer : undefined;
+  }
+
+  private getAdvancedVirtualizer(): CodeView<LAnnotation> | undefined {
+    return this.virtualizer.type === 'advanced' ? this.virtualizer : undefined;
   }
 
   private isResizeDebuggingEnabled(): boolean {

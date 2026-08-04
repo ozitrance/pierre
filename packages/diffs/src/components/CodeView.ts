@@ -322,16 +322,6 @@ export const CODE_VIEW_FILE_OPTION_KEYS = [
 
 type CodeViewFileOptionKeys = (typeof CODE_VIEW_FILE_OPTION_KEYS)[number];
 
-// Option values Editor.edit requires before it attaches to an instance. These
-// keys are excluded from the plain pass-through loops (defineItemOption
-// properties are non-configurable and cannot be redefined) so the prototypes
-// can define edit-aware getters that serve the editor-required value while an
-// item is in edit mode. Without this, Editor.edit would fall back to
-// instance.setOptions, which throws for CodeView-managed instances.
-const CODE_VIEW_EDIT_FORCED_OPTION_KEYS: ReadonlySet<string> = new Set([
-  'useTokenTransformer',
-]);
-
 type CodeViewPassThroughOptions<LAnnotation> = Pick<
   FileDiffOptions<LAnnotation>,
   CodeViewDiffOptionKeys
@@ -661,6 +651,11 @@ type PendingScrollTarget =
   | PendingRangeTarget
   | PendingItemTarget;
 
+type CodeViewItemMap<LAnnotation> = Map<
+  string,
+  CodeViewContextItem<LAnnotation>
+>;
+
 export class CodeView<LAnnotation = undefined> {
   static __STOP = false;
   static __lastScrollPosition = 0;
@@ -672,7 +667,7 @@ export class CodeView<LAnnotation = undefined> {
     resizeDebugging: false,
   };
   private items: CodeViewContextItem<LAnnotation>[] = [];
-  private idToItem: Map<string, CodeViewContextItem<LAnnotation>> = new Map();
+  private idToItem: CodeViewItemMap<LAnnotation> = new Map();
   private selectedLines: CodeViewLineSelection | null = null;
   // One editor per edit-mode item, created lazily via options.createEditor.
   // Entries survive virtualization unmounts so a remounted item re-attaches
@@ -1508,8 +1503,8 @@ export class CodeView<LAnnotation = undefined> {
     this.markItemLayoutDirty(item);
     this.scrollDirty = true;
     this.render();
-    this.syncSelection();
     this.syncItemEditors();
+    this.syncSelection();
     return true;
   }
 
@@ -1559,37 +1554,36 @@ export class CodeView<LAnnotation = undefined> {
 
   public addItems(inputs: readonly CodeViewItem<LAnnotation>[]): void {
     this.appendItemsInternal(inputs);
-    this.syncSelection();
     this.syncItemEditors();
+    this.syncSelection();
+  }
+
+  public removeItem(itemId: string): boolean {
+    const item = this.idToItem.get(itemId);
+    if (item == null) {
+      console.error(`CodeView.removeItem: unknown item id "${itemId}"`);
+      return false;
+    }
+
+    const nextItems: CodeViewItem<LAnnotation>[] = [];
+    for (const current of this.items) {
+      if (current !== item) {
+        nextItems.push(current.item);
+      }
+    }
+    this.setItems(nextItems);
+    return true;
   }
 
   public setItems(items: readonly CodeViewItem<LAnnotation>[]): void {
-    if (items.length === 0) {
-      // An empty controlled list removes every item, so end active edit
-      // sessions the way reconcile removals do: publish each session's final
-      // contents (from its last change) through onItemEditComplete. Direct
-      // reset()/cleanUp() calls stay silent — those are teardowns, not item
-      // data updates.
-      const completions: CodeViewItemEditChange<LAnnotation>[] = [];
-      for (const record of this.itemEditors.values()) {
-        const { lastChange } = record.state;
-        if (lastChange != null) {
-          completions.push(lastChange);
-        }
-      }
-      this.reset();
-      // Fired after reset so a handler that calls back into setItems/addItems
-      // runs against clean state (mirrors syncItemEditors' post-loop firing).
-      for (const { item, file, lineAnnotations } of completions) {
-        this.options.onItemEditComplete?.(item, file, lineAnnotations);
-      }
-    } else if (this.items.length === 0) {
+    let removedItemsById: Readonly<CodeViewItemMap<LAnnotation>> | undefined;
+    if (this.items.length === 0) {
       this.appendItemsInternal(items);
     } else if (!this.tryAppendItems(items)) {
-      this.reconcileItems(items);
+      removedItemsById = this.reconcileItems(items);
     }
+    this.syncItemEditors(removedItemsById);
     this.syncSelection();
-    this.syncItemEditors();
   }
 
   /**
@@ -1716,7 +1710,9 @@ export class CodeView<LAnnotation = undefined> {
     }
   }
 
-  private capturePendingLayoutAnchor(): void {
+  public capturePendingLayoutAnchor(
+    nextItems: Readonly<CodeViewItemMap<LAnnotation>> = this.idToItem
+  ): void {
     if (
       this.root == null ||
       this.items.length === 0 ||
@@ -1725,7 +1721,10 @@ export class CodeView<LAnnotation = undefined> {
       return;
     }
 
-    this.pendingLayoutAnchor = this.getScrollAnchor(this.getScrollTop());
+    this.pendingLayoutAnchor = this.getScrollAnchor(
+      this.getScrollTop(),
+      nextItems
+    );
   }
 
   public render(immediate = false): void {
@@ -2004,6 +2003,7 @@ export class CodeView<LAnnotation = undefined> {
     const item = this.idToItem.get(this.selectedLines.id);
     if (item == null) {
       this.selectedLines = null;
+      this.options.onSelectedLinesChange?.(null);
       return;
     }
 
@@ -2013,21 +2013,6 @@ export class CodeView<LAnnotation = undefined> {
   // Collapsing an edited item suspends editing until it expands again.
   private isItemInEditMode(item: CodeViewContextItem<LAnnotation>): boolean {
     return item.item.edit === true && item.item.collapsed !== true;
-  }
-
-  // True when the receiving item options belong to an item currently in edit
-  // mode. The edit-forced option getters use this to serve editor-required
-  // values (see CODE_VIEW_EDIT_FORCED_OPTION_KEYS).
-  private isReceiverEdited<TMode extends CodeViewMode>(
-    receiver: CodeViewModeOptions<LAnnotation, TMode>,
-    mode: TMode
-  ): boolean {
-    const state = getItemOptionsState(receiver);
-    if (state == null) {
-      return false;
-    }
-    const item = this.getItemOptions(state, mode);
-    return item != null && this.isItemInEditMode(item);
   }
 
   /**
@@ -2100,7 +2085,9 @@ export class CodeView<LAnnotation = undefined> {
    * attachItemEditor, so this only reconciles editors CodeView is already
    * holding.
    */
-  private syncItemEditors(): void {
+  private syncItemEditors(
+    removedItems?: Readonly<CodeViewItemMap<LAnnotation>>
+  ): void {
     if (this.itemEditors.size === 0) {
       return;
     }
@@ -2108,7 +2095,8 @@ export class CodeView<LAnnotation = undefined> {
     const completions: CodeViewItemEditChange<LAnnotation>[] = [];
     for (const [id, record] of this.itemEditors) {
       const item = this.idToItem.get(id);
-      if (item != null && this.isItemInEditMode(item)) {
+      const removedItem = removedItems?.get(id);
+      if (removedItem == null && item != null && this.isItemInEditMode(item)) {
         continue;
       }
       // cleanUp is idempotent, so editors already detached by their released
@@ -2121,10 +2109,15 @@ export class CodeView<LAnnotation = undefined> {
       // so finish the session here (idempotent: the dirty marker clears on
       // the first run). A live item goes through its instance, which also
       // preserves expansion state and invalidates layout; removed items fall
-      // back to a plain metadata recompute from the last change's snapshot.
-      const itemSnapshot = item?.item ?? record.state.lastChange?.item;
+      // back to the snapshot captured with the editor's last change.
+      const { lastChange } = record.state;
+      const itemSnapshot =
+        removedItem == null
+          ? (item?.item ?? lastChange?.item)
+          : (lastChange?.item ?? removedItem.item);
       if (itemSnapshot?.type === 'diff') {
         if (
+          removedItem == null &&
           item != null &&
           item.type === 'diff' &&
           item.instance.completeEditSession()
@@ -2134,13 +2127,14 @@ export class CodeView<LAnnotation = undefined> {
         }
         finishEditSessionForDiff(itemSnapshot.fileDiff);
       }
-      const { lastChange } = record.state;
       if (lastChange != null) {
         // Prefer the current item record (it carries the update that ended
         // the session, e.g. edit: false); the snapshot from the last change
         // covers sessions ended by removing the item.
         completions.push(
-          item == null ? lastChange : { ...lastChange, item: item.item }
+          removedItem != null || item == null
+            ? lastChange
+            : { ...lastChange, item: item.item }
         );
       }
     }
@@ -2179,9 +2173,6 @@ export class CodeView<LAnnotation = undefined> {
     const prototype = {} as FileOptions<LAnnotation>;
 
     for (const key of CODE_VIEW_FILE_OPTION_KEYS) {
-      if (CODE_VIEW_EDIT_FORCED_OPTION_KEYS.has(key)) {
-        continue;
-      }
       defineItemOption<FileOptions<LAnnotation>, CodeViewFileOptionKeys>(
         prototype,
         key,
@@ -2189,14 +2180,8 @@ export class CodeView<LAnnotation = undefined> {
       );
     }
 
-    // Edit-forced options: while the item is in edit mode these serve the
-    // values Editor.edit requires so it never falls back to
-    // instance.setOptions (which throws for CodeView-managed instances).
-    defineItemOption(prototype, 'useTokenTransformer', (receiver) =>
-      this.isReceiverEdited(receiver, 'file')
-        ? true
-        : this.options.useTokenTransformer
-    );
+    // Mapped options: served from CodeView-level names or per-item state
+    // that the plain pass-through loop cannot express.
     defineItemOption(
       prototype,
       'stickyHeader',
@@ -2224,9 +2209,6 @@ export class CodeView<LAnnotation = undefined> {
     const prototype = {} as FileDiffOptions<LAnnotation>;
 
     for (const key of CODE_VIEW_DIFF_OPTION_KEYS) {
-      if (CODE_VIEW_EDIT_FORCED_OPTION_KEYS.has(key)) {
-        continue;
-      }
       defineItemOption<FileDiffOptions<LAnnotation>, CodeViewDiffOptionKeys>(
         prototype,
         key,
@@ -2234,14 +2216,8 @@ export class CodeView<LAnnotation = undefined> {
       );
     }
 
-    // Edit-forced options: while the item is in edit mode these serve the
-    // values Editor.edit requires so it never falls back to
-    // instance.setOptions (which throws for CodeView-managed instances).
-    defineItemOption(prototype, 'useTokenTransformer', (receiver) =>
-      this.isReceiverEdited(receiver, 'diff')
-        ? true
-        : this.options.useTokenTransformer
-    );
+    // Mapped options: served from CodeView-level names or per-item state
+    // that the plain pass-through loop cannot express.
     defineItemOption(
       prototype,
       'stickyHeader',
@@ -2514,7 +2490,9 @@ export class CodeView<LAnnotation = undefined> {
    * records, rebuilds the lookup maps, and marks layout dirty whenever order,
    * membership, or versioned item data changes.
    */
-  private reconcileItems(items: readonly CodeViewItem<LAnnotation>[]): void {
+  private reconcileItems(
+    items: readonly CodeViewItem<LAnnotation>[]
+  ): Readonly<CodeViewItemMap<LAnnotation>> | undefined {
     const { items: previousItems, idToItem: previousById } = this;
     const removedItems = new Set(previousItems);
     const nextItems: CodeViewContextItem<LAnnotation>[] = [];
@@ -2526,6 +2504,7 @@ export class CodeView<LAnnotation = undefined> {
       VirtualizedFileDiff<LAnnotation> | VirtualizedFile<LAnnotation>,
       CodeViewContextItem<LAnnotation>
     > = new Map();
+    const removedItemsById: CodeViewItemMap<LAnnotation> = new Map();
     let firstDirtyIndex: number | undefined;
 
     for (let index = 0; index < items.length; index++) {
@@ -2563,18 +2542,24 @@ export class CodeView<LAnnotation = undefined> {
       nextInstanceToItem.set(item.instance, item);
     }
 
+    if (firstDirtyIndex == null) {
+      if (removedItems.size === 0) {
+        return undefined;
+      }
+      firstDirtyIndex = Math.max(nextItems.length - 1, 0);
+    }
+
+    this.capturePendingLayoutAnchor(nextIdToItem);
+
     for (let index = 0; index < previousItems.length; index++) {
       const removedItem = previousItems[index];
       if (removedItem == null || !removedItems.has(removedItem)) {
         continue;
       }
+      removedItemsById.set(removedItem.item.id, removedItem);
       this.releaseRenderedItem(removedItem);
       const dirtyIndex = Math.max(nextItems.length - 1, 0);
       firstDirtyIndex = Math.min(firstDirtyIndex ?? dirtyIndex, dirtyIndex);
-    }
-
-    if (firstDirtyIndex == null) {
-      return;
     }
 
     this.items = nextItems;
@@ -2590,6 +2575,7 @@ export class CodeView<LAnnotation = undefined> {
     this.markLayoutDirtyFromIndex(firstDirtyIndex);
     this.scrollDirty = true;
     this.render();
+    return removedItemsById.size > 0 ? removedItemsById : undefined;
   }
 
   /**
@@ -3520,6 +3506,12 @@ export class CodeView<LAnnotation = undefined> {
   private updateStickyPositioning(): void {
     const stickyBounds = this.getStickyBounds();
     if (stickyBounds == null) {
+      // No rendered slice means no sticky scaffold: clear the spacer so an
+      // emptied viewer sheds the offset height captured from the last
+      // rendered layout instead of keeping phantom space in the container.
+      if (this.renderState.firstIndex === -1) {
+        this.stickyOffset.style.height = '';
+      }
       return;
     }
     const { stickyTop, stickyBottom } = stickyBounds;
@@ -3671,10 +3663,25 @@ export class CodeView<LAnnotation = undefined> {
    * A scroll anchor represents the first fully visible element (in other
    * words, the first file or first line who's top is fully in the viewport).
    */
-  private getScrollAnchor(scrollTop: number): ScrollAnchor | undefined {
-    // If we already have a pendingLayoutAnchor, let's use that.
-    if (this.pendingLayoutAnchor != null) {
-      return this.pendingLayoutAnchor;
+  private getScrollAnchor(
+    scrollTop: number,
+    availableItems: ReadonlyMap<string, CodeViewContextItem<LAnnotation>> = this
+      .idToItem
+  ): ScrollAnchor | undefined {
+    let skippedItem: CodeViewContextItem<LAnnotation> | undefined;
+
+    const { pendingLayoutAnchor } = this;
+    if (pendingLayoutAnchor != null) {
+      const pendingItem = this.idToItem.get(pendingLayoutAnchor.id);
+      if (
+        pendingItem != null &&
+        availableItems.get(pendingLayoutAnchor.id) === pendingItem
+      ) {
+        return pendingLayoutAnchor;
+      }
+      if (pendingItem != null) {
+        skippedItem = pendingItem;
+      }
     }
 
     // We shouldn't scroll anchor when at the top, this way if a custom header
@@ -3713,6 +3720,12 @@ export class CodeView<LAnnotation = undefined> {
         break;
       }
 
+      const itemIsAvailable = availableItems.get(item.item.id) === item;
+      if (!itemIsAvailable) {
+        skippedItem ??= item;
+        continue;
+      }
+
       if (absoluteItemTop >= scrollTop) {
         return {
           type: 'item',
@@ -3737,6 +3750,28 @@ export class CodeView<LAnnotation = undefined> {
           side: lineAnchor.side,
           viewportOffset: absoluteLineTop - scrollTop,
         };
+      }
+    }
+
+    // If we couldn't find an anchored item and we have a skipped item, lets
+    // attempt to anchor to the top of the item that came after it
+    if (skippedItem != null) {
+      for (
+        let index = skippedItem.index + 1;
+        index < this.items.length;
+        index++
+      ) {
+        const candidate = this.items[index];
+        if (
+          candidate != null &&
+          availableItems.get(candidate.item.id) === candidate
+        ) {
+          return {
+            type: 'item',
+            id: candidate.item.id,
+            viewportOffset: 0,
+          };
+        }
       }
     }
 
