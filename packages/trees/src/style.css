@@ -595,14 +595,21 @@
     flex-direction: column;
   }
 
+  /* The wrapper for the tree items. Scoped to the root element (which
+   * carries the tree / listbox / group role depending on the view mode)
+   * because the columns view puts listbox roles on its scrollable panes,
+   * where a flex layout would break their scroll geometry. */
   [data-file-tree-virtualized-root='true'] {
     height: 100%;
+    position: relative;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    gap: var(--trees-gap-override, 0);
   }
 
   [data-file-tree-virtualized-scroll='true'],
+  [data-file-tree-column],
   [data-file-tree-scrollbar-measure='true'] {
     --trees-scrollbar-thumb-current: transparent;
     overflow-y: auto;
@@ -649,13 +656,15 @@
 
   @supports (-moz-appearance: none) {
     [data-file-tree-virtualized-scroll='true'],
+    [data-file-tree-column],
     [data-file-tree-scrollbar-measure='true'] {
       scrollbar-width: thin;
       scrollbar-color: var(--trees-scrollbar-thumb-current) transparent;
     }
   }
 
-  [data-file-tree-virtualized-scroll='true'] {
+  [data-file-tree-virtualized-scroll='true'],
+  [data-file-tree-column] {
     position: relative;
     overflow-y: auto;
     flex: 1 1 0;
@@ -683,7 +692,8 @@
   }
 
   @supports (-moz-appearance: none) {
-    [data-file-tree-virtualized-scroll='true'] {
+    [data-file-tree-virtualized-scroll='true'],
+    [data-file-tree-column] {
       padding-inline: max(
           calc(var(--trees-padding-inline) - var(--trees-item-margin-x)),
           0px
@@ -807,12 +817,198 @@
     }
   }
 
-  /* The wrapper for the tree items */
-  [role='tree'] {
+  /* EXPLORER MODE NAVIGATION BAR */
+  [data-file-tree-explorer-bar] {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+    padding-inline: var(--trees-padding-inline);
+    margin-bottom: var(--trees-item-row-gap);
+    font-family: var(--trees-font-family);
+    font-size: var(--trees-font-size);
+  }
+
+  [data-file-tree-explorer-up] {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--trees-row-height);
+    height: var(--trees-row-height);
+    padding: 0;
+    color: inherit;
+    background: none;
+    border: none;
+    border-radius: var(--trees-border-radius);
+    cursor: pointer;
+
+    &:hover:not(:disabled) {
+      background-color: var(--trees-bg-muted);
+    }
+
+    &:disabled {
+      color: var(--trees-fg-muted);
+      opacity: 0.5;
+      cursor: default;
+    }
+
+    &:focus-visible {
+      outline: var(--trees-focus-ring-width) solid var(--trees-focus-ring-color);
+      outline-offset: var(--trees-focus-ring-offset);
+    }
+  }
+
+  /* Chevron pointing left for the "go up one level" affordance. The nested
+   * selectors outweigh the base chevron alignment rules, which also set
+   * `transform`. */
+  [data-file-tree-explorer-up] [data-icon-name='file-tree-icon-chevron'] {
+    &[data-align-capitals='false'],
+    &[data-align-capitals='true'] {
+      transform: rotate(90deg);
+    }
+  }
+
+  [data-file-tree-breadcrumbs] {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  [data-file-tree-breadcrumb] {
+    flex: 0 1 auto;
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    height: var(--trees-row-height);
+    padding: 0 4px;
+    color: var(--trees-fg-muted);
+    font: inherit;
+    background: none;
+    border: none;
+    border-radius: var(--trees-border-radius);
+    cursor: pointer;
+
+    &:hover {
+      color: inherit;
+      background-color: var(--trees-bg-muted);
+    }
+
+    /* The trailing crumb is the current directory, not a navigation target. */
+    &[aria-current='location'] {
+      color: inherit;
+      cursor: default;
+
+      &:hover {
+        background: none;
+      }
+    }
+
+    &:focus-visible {
+      outline: var(--trees-focus-ring-width) solid var(--trees-focus-ring-color);
+      outline-offset: var(--trees-focus-ring-offset);
+    }
+  }
+
+  [data-file-tree-breadcrumb-separator] {
+    flex: 0 0 auto;
+    color: var(--trees-fg-muted);
+    opacity: 0.6;
+    user-select: none;
+  }
+
+  [data-file-tree-explorer-empty] {
+    padding: calc(var(--trees-row-height) / 2) var(--trees-padding-inline);
+    color: var(--trees-fg-muted);
+    font-family: var(--trees-font-family);
+    font-size: var(--trees-font-size);
+    user-select: none;
+  }
+
+  /* COLUMNS MODE (Miller columns) */
+  /* Outside columns mode the wrapper contributes no box, so the scroll
+   * container keeps its usual flex slot in the root column layout. */
+  [data-file-tree-columns-wrap='inactive'] {
+    display: contents;
+  }
+
+  [data-file-tree-columns-wrap='active'] {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
+    overflow: auto hidden;
+
+    /* Every pane, including the active listing, is the same fixed width —
+     * leftover space stays empty (like Finder) so pane widths never jump as
+     * the preview pane appears or a pane changes role during navigation. */
+    > [data-file-tree-column],
+    > [data-file-tree-virtualized-scroll='true'] {
+      flex: 0 0 var(--trees-columns-pane-width, 14em);
+      width: var(--trees-columns-pane-width, 14em);
+      min-width: 0;
+      border-inline-end: 1px solid var(--trees-border-color);
+    }
+  }
+
+  /* Scroll/padding metrics come from the shared scroll-container rules (the
+   * pane selector is part of those groups) so a listing keeps identical
+   * horizontal geometry whether it renders as a side pane or as the active
+   * pane. */
+  [data-file-tree-column] {
+    overflow-x: hidden;
+  }
+
+  /* A flex column (like the main virtualized window) so row buttons stretch
+   * to the pane width instead of shrink-wrapping their content. */
+  [data-file-tree-column-list] {
     position: relative;
+    overflow-anchor: none;
     display: flex;
     flex-direction: column;
-    gap: var(--trees-gap-override, 0);
+  }
+
+  [data-file-tree-column-offset] {
+    flex: 0 0 auto;
+  }
+
+  /* Ancestor-chain rows mirror selection with a muted wash so the path from
+   * the root pane to the active pane reads at a glance. */
+  button[data-type='item'][data-item-chain-selected='true'] {
+    background-color: color-mix(
+      in lab,
+      var(--trees-selected-bg) 45%,
+      var(--trees-bg)
+    );
+    --truncate-marker-background-overlay-color: color-mix(
+      in lab,
+      var(--trees-selected-bg) 45%,
+      var(--trees-bg)
+    );
+  }
+
+  /* Sits directly after the (possibly truncated) name — the row's own `gap`
+   * provides the spacing — leaving the rest of the row to the right-aligned
+   * attribute lanes (decorations, git status). */
+  [data-item-column-descend] {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    color: var(--trees-fg-muted);
+  }
+
+  /* Chevron pointing right: side-pane directories descend into the next
+   * pane. Nested to outweigh the base chevron alignment rules, which also
+   * set `transform`. */
+  [data-item-column-descend] [data-icon-name='file-tree-icon-chevron'] {
+    &[data-align-capitals='false'],
+    &[data-align-capitals='true'] {
+      transform: rotate(-90deg);
+    }
   }
 
   /* LIST ITEM */
@@ -1130,6 +1326,45 @@
     /* white-space: nowrap; */
   }
 
+  /* METADATA COLUMNS
+   * Right-aligned detail cells (size, modified time, commit message). The
+   * lane receives the width left after the item name so cells line up without
+   * squeezing the primary label away. The message cell is the flexible one
+   * and truncates first; any remaining fixed-cell overflow is clipped. */
+  [data-item-section='metadata'] {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--trees-item-row-gap);
+    margin-inline-start: auto;
+    overflow: hidden;
+    color: var(--trees-fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  [data-item-section='metadata'] > span {
+    flex: 0 0 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: end;
+  }
+
+  [data-item-section='metadata'] > [data-item-column='size'] {
+    width: var(--trees-column-size-width, 4.5em);
+  }
+
+  [data-item-section='metadata'] > [data-item-column='modified'] {
+    width: var(--trees-column-modified-width, 6em);
+  }
+
+  [data-item-section='metadata'] > [data-item-column='message'] {
+    flex: 0 1 var(--trees-column-message-width, 22em);
+    text-align: start;
+  }
+
   [data-item-section='decoration'] {
     flex: 1 1 0;
     min-width: 0;
@@ -1138,6 +1373,13 @@
     text-align: end;
     overflow: hidden;
     color: var(--trees-fg-muted);
+  }
+
+  /* When a row carries metadata cells, the metadata lane is the one that
+   * absorbs the free row width. The decoration lane must not split it with
+   * its own flex-grow, or the cells drift out of column alignment. */
+  [data-item-section='metadata'] ~ [data-item-section='decoration'] {
+    flex: 0 1 auto;
   }
 
   [data-item-section='decoration'] > span {
@@ -1201,7 +1443,9 @@
   [data-item-section='content']:has([data-item-rename-input])
     ~ [data-item-section='action'],
   [data-item-section='content']:has([data-item-rename-input])
-    ~ [data-item-section='decoration'] {
+    ~ [data-item-section='decoration'],
+  [data-item-section='content']:has([data-item-rename-input])
+    ~ [data-item-section='metadata'] {
     display: none;
   }
 
@@ -1327,6 +1571,21 @@
 
   [data-item-dragging='true'] {
     opacity: 0.5;
+  }
+
+  /* Columns mode: hovering a pane's background (not a row) targets the pane's
+   * own directory, so the whole pane takes the drop highlight — matching the
+   * row treatment above, Finder-style. */
+  [data-file-tree-column-drag-target='true'] {
+    background-color: var(--trees-selected-bg);
+  }
+
+  /* The active pane's virtualized list paints an opaque --trees-bg (it masks
+   * sticky-overlay handoffs in tree mode). While the pane is the drop target,
+   * let the pane tint show through instead of surfacing only in the gutters. */
+  [data-file-tree-column-drag-target='true']
+    [data-file-tree-virtualized-list='true'] {
+    background-color: transparent;
   }
 
   /* Lock icon for locked paths (sibling of content) */

@@ -40,6 +40,55 @@ export type FileTreeSortComparator = (
 
 export type FileTreeInitialExpansion = 'closed' | 'open' | number;
 
+/**
+ * How the tree presents its paths. `'tree'` is the classic expandable
+ * hierarchy. `'explorer'` shows one directory at a time as a flat listing —
+ * Enter or double-click descends into a directory, back/up returns to the
+ * parent — like a terminal file explorer. `'columns'` is a Miller-column
+ * layout over the same navigation state: the explorer listing plus one pane
+ * per ancestor directory and a preview pane for the focused directory, like
+ * the macOS Finder columns view. The mode can be switched at runtime with
+ * `setViewMode()`.
+ */
+export type FileTreeViewMode = 'tree' | 'explorer' | 'columns';
+
+/** One segment of the explorer-mode current directory, root excluded. */
+export interface FileTreeBreadcrumb {
+  name: string;
+  path: FileTreePublicId;
+}
+
+/**
+ * One pane of the columns view, left to right: `'ancestor'` panes list each
+ * directory on the current chain (starting at the root), the `'active'` pane
+ * is the explorer listing itself, and the optional `'preview'` pane lists the
+ * children of the focused directory row.
+ */
+export interface FileTreeExplorerColumn {
+  // Canonical directory this pane lists; '' is the root.
+  directoryPath: FileTreePublicId;
+  kind: 'ancestor' | 'active' | 'preview';
+  // Directory basename; '' for the root pane.
+  name: string;
+  rowCount: number;
+  // Position of the chain child inside an ancestor pane's listing (the
+  // directory the next pane descends into); -1 for active/preview panes.
+  selectedIndex: number;
+  // Canonical path of that chain child; null for active/preview panes.
+  selectedPath: FileTreePublicId | null;
+}
+
+export interface FileTreeExplorerConfig {
+  // Directory the explorer starts in when the tree is constructed with
+  // `viewMode: 'explorer'`. Defaults to the root ('').
+  initialDirectory?: FileTreePublicId;
+  // Fired after every successful explorer navigation with the new current
+  // directory as a canonical path ('' for the root).
+  onNavigate?: (directoryPath: FileTreePublicId) => void;
+  // Fired when a file is activated in explorer mode (Enter or double-click).
+  onOpenFile?: (path: FileTreePublicId) => void;
+}
+
 export interface FileTreeRemoveOptions {
   recursive?: boolean;
 }
@@ -86,11 +135,13 @@ type FileTreeInputOptions =
 
 type FileTreeControllerBehaviorOptions = FileTreeStoreOptions & {
   dragAndDrop?: boolean | FileTreeDragAndDropConfig;
+  explorer?: FileTreeExplorerConfig;
   fileTreeSearchMode?: FileTreeSearchMode;
   initialSearchQuery?: string | null;
   initialSelectedPaths?: readonly FileTreePublicId[];
   onSearchChange?: FileTreeSearchChangeListener;
   renaming?: boolean | FileTreeRenamingConfig;
+  viewMode?: FileTreeViewMode;
 };
 
 export type FileTreeControllerOptions = FileTreeControllerBehaviorOptions &
@@ -146,6 +197,10 @@ export interface FileTreeFileHandle extends FileTreeItemHandleBase {
 export type FileTreeItemHandle = FileTreeDirectoryHandle | FileTreeFileHandle;
 
 export interface FileTreeRenderOptions {
+  // Whether columns-view directory rows render a trailing chevron next to
+  // their name pointing at the next pane. Only read in 'columns' view mode.
+  // Defaults to true.
+  columnsDescendAffordance?: boolean;
   // Hint how many rows should fit in the first render before the browser can
   // measure the real scroll viewport. Fractional values are allowed when the
   // desired first-render budget is not an exact multiple of itemHeight.
@@ -232,11 +287,13 @@ export interface FileTreeRenamingConfig {
 }
 
 type FileTreeOptionSurface = FileTreeRenderOptions & {
+  columns?: readonly FileTreeColumn[];
   composition?: FileTreeCompositionOptions;
   density?: FileTreeDensity;
   gitStatus?: readonly GitStatusEntry[];
   id?: string;
   icons?: FileTreeIcons;
+  metadata?: readonly FileTreeMetadataEntry[];
   onSelectionChange?: FileTreeSelectionChangeListener;
   renderRowDecoration?: FileTreeRowDecorationRenderer;
   search?: boolean;
@@ -459,3 +516,46 @@ export interface FileTreeRowDecorationContext {
 export type FileTreeRowDecorationRenderer = (
   context: FileTreeRowDecorationContext
 ) => FileTreeRowDecoration | null;
+
+/**
+ * Optional per-item detail data rendered by the metadata column lane. All
+ * fields are independent; provide whichever ones the configured columns read.
+ */
+export interface FileTreeItemMetadata {
+  // Summary of the last commit that touched the item.
+  commitMessage?: string;
+  // Last-modified time in epoch milliseconds.
+  modifiedAt?: number;
+  // Size in bytes. Directories can provide one too (e.g. an aggregated
+  // subtree size); the size column renders whatever is supplied.
+  sizeBytes?: number;
+}
+
+export interface FileTreeMetadataEntry extends FileTreeItemMetadata {
+  path: FileTreePublicId;
+}
+
+export interface FileTreeMetadataPatch {
+  remove?: readonly FileTreePublicId[];
+  set?: readonly FileTreeMetadataEntry[];
+}
+
+export type FileTreeColumnKind = 'message' | 'modified' | 'size';
+
+export interface FileTreeColumnFormatContext {
+  item: FileTreeContextMenuItem;
+  metadata: FileTreeItemMetadata | null;
+}
+
+/**
+ * One metadata column rendered on the right side of every row, in array
+ * order. Each built-in kind reads one `FileTreeItemMetadata` field and ships a
+ * default formatter; pass `format` to override the cell text (return null to
+ * leave the cell empty).
+ */
+export interface FileTreeColumn {
+  kind: FileTreeColumnKind;
+  format?: (context: FileTreeColumnFormatContext) => string | null;
+  // CSS width for the cell (e.g. '96px', '8em'). Defaults per kind.
+  width?: string;
+}

@@ -1113,6 +1113,275 @@ describe('file-tree drag and drop', () => {
     }
   });
 
+  test('startDrag works in columns mode but stays blocked in explorer mode', async () => {
+    const FileTreeController = await loadFileTreeController();
+
+    const controller = new FileTreeController({
+      dragAndDrop: true,
+      explorer: { initialDirectory: 'src' },
+      flattenEmptyDirectories: true,
+      paths: ['README.md', 'docs/guide.md', 'src/index.ts'],
+      viewMode: 'explorer',
+    });
+
+    try {
+      expect(controller.startDrag('src/index.ts')).toBe(false);
+      expect(controller.getDragSession()).toBeNull();
+
+      controller.setViewMode('columns');
+      expect(controller.startDrag('src/index.ts')).toBe(true);
+      expect(controller.getDragSession()).toEqual({
+        draggedPaths: ['src/index.ts'],
+        primaryPath: 'src/index.ts',
+        target: null,
+      });
+    } finally {
+      controller.destroy();
+    }
+  });
+
+  test('columns mode drops an active-pane row onto an ancestor-pane directory', async () => {
+    const completed: FileTreeDropResult[] = [];
+    const rendered = await renderFileTree({
+      dragAndDrop: {
+        onDropComplete: (event: FileTreeDropResult) => {
+          completed.push(event);
+        },
+      },
+      explorer: { initialDirectory: 'src' },
+      flattenEmptyDirectories: true,
+      paths: ['README.md', 'docs/guide.md', 'src/index.ts', 'src/lib/utils.ts'],
+      viewMode: 'columns',
+      initialVisibleRowCount: 180 / 30,
+    });
+
+    try {
+      const sourceButton = getItemButton(
+        rendered.shadowRoot,
+        rendered.dom,
+        'src/index.ts'
+      );
+      const ancestorTarget = getItemButton(
+        rendered.shadowRoot,
+        rendered.dom,
+        'docs/'
+      );
+      const dataTransfer = createMockDataTransfer();
+      rendered.dom.window.document.elementFromPoint = () => ancestorTarget;
+
+      dispatchDragEvent(sourceButton, rendered.dom, 'dragstart', {
+        dataTransfer,
+      });
+      await flushDom();
+      expect(getDraggingPaths(rendered.shadowRoot)).toEqual(['src/index.ts']);
+
+      dispatchDragEvent(ancestorTarget, rendered.dom, 'dragover', {
+        dataTransfer,
+      });
+      await flushDom();
+      expect(getDragTargetPaths(rendered.shadowRoot)).toEqual(['docs/']);
+
+      dispatchDragEvent(rendered.treeRoot, rendered.dom, 'drop', {
+        dataTransfer,
+      });
+      await flushDom();
+
+      expect(rendered.fileTree.getItem('docs/index.ts')).not.toBeNull();
+      expect(rendered.fileTree.getItem('src/index.ts')).toBeNull();
+      expect(completed).toEqual([
+        {
+          draggedPaths: ['src/index.ts'],
+          operation: 'move',
+          target: {
+            directoryPath: 'docs/',
+            flattenedSegmentPath: null,
+            hoveredPath: 'docs/',
+            kind: 'directory',
+          },
+        },
+      ]);
+      expect(getDraggingPaths(rendered.shadowRoot)).toEqual([]);
+      expect(getDragTargetPaths(rendered.shadowRoot)).toEqual([]);
+    } finally {
+      rendered.cleanup();
+    }
+  });
+
+  test('columns mode drags a side-pane row onto the active pane background', async () => {
+    const completed: FileTreeDropResult[] = [];
+    const rendered = await renderFileTree({
+      dragAndDrop: {
+        onDropComplete: (event: FileTreeDropResult) => {
+          completed.push(event);
+        },
+      },
+      explorer: { initialDirectory: 'src' },
+      flattenEmptyDirectories: true,
+      paths: ['README.md', 'docs/guide.md', 'src/index.ts', 'src/lib/utils.ts'],
+      viewMode: 'columns',
+      initialVisibleRowCount: 180 / 30,
+    });
+
+    try {
+      const sourceButton = getItemButton(
+        rendered.shadowRoot,
+        rendered.dom,
+        'README.md'
+      );
+      const activePane = getScrollElement(rendered.shadowRoot, rendered.dom);
+      expect(activePane.getAttribute('data-file-tree-drop-directory')).toBe(
+        'src/'
+      );
+      const dataTransfer = createMockDataTransfer();
+      rendered.dom.window.document.elementFromPoint = () => activePane;
+
+      dispatchDragEvent(sourceButton, rendered.dom, 'dragstart', {
+        dataTransfer,
+      });
+      await flushDom();
+      expect(getDraggingPaths(rendered.shadowRoot)).toEqual(['README.md']);
+
+      dispatchDragEvent(activePane, rendered.dom, 'dragover', {
+        dataTransfer,
+      });
+      await flushDom();
+      expect(activePane.getAttribute('data-file-tree-column-drag-target')).toBe(
+        'true'
+      );
+      // The src/ directory row in the root pane mirrors the same target.
+      expect(getDragTargetPaths(rendered.shadowRoot)).toEqual(['src/']);
+
+      dispatchDragEvent(rendered.treeRoot, rendered.dom, 'drop', {
+        dataTransfer,
+      });
+      await flushDom();
+
+      expect(rendered.fileTree.getItem('src/README.md')).not.toBeNull();
+      expect(rendered.fileTree.getItem('README.md')).toBeNull();
+      expect(completed).toEqual([
+        {
+          draggedPaths: ['README.md'],
+          operation: 'move',
+          target: {
+            directoryPath: 'src/',
+            flattenedSegmentPath: null,
+            hoveredPath: null,
+            kind: 'directory',
+          },
+        },
+      ]);
+      expect(
+        activePane.getAttribute('data-file-tree-column-drag-target')
+      ).toBeNull();
+    } finally {
+      rendered.cleanup();
+    }
+  });
+
+  test('columns mode side-pane background drops move into that pane directory', async () => {
+    const rendered = await renderFileTree({
+      dragAndDrop: true,
+      explorer: { initialDirectory: 'src' },
+      flattenEmptyDirectories: true,
+      paths: ['README.md', 'docs/guide.md', 'src/index.ts', 'src/lib/utils.ts'],
+      viewMode: 'columns',
+      initialVisibleRowCount: 180 / 30,
+    });
+
+    try {
+      const rootPane = rendered.shadowRoot?.querySelector(
+        '[data-file-tree-column="ancestor"][data-file-tree-drop-directory=""]'
+      );
+      if (!(rootPane instanceof rendered.dom.window.HTMLElement)) {
+        throw new Error('missing root ancestor pane');
+      }
+      const sourceButton = getItemButton(
+        rendered.shadowRoot,
+        rendered.dom,
+        'src/index.ts'
+      );
+      const dataTransfer = createMockDataTransfer();
+      rendered.dom.window.document.elementFromPoint = () => rootPane;
+
+      dispatchDragEvent(sourceButton, rendered.dom, 'dragstart', {
+        dataTransfer,
+      });
+      await flushDom();
+      dispatchDragEvent(rootPane, rendered.dom, 'dragover', {
+        dataTransfer,
+      });
+      await flushDom();
+      expect(rootPane.getAttribute('data-file-tree-column-drag-target')).toBe(
+        'true'
+      );
+
+      dispatchDragEvent(rendered.treeRoot, rendered.dom, 'drop', {
+        dataTransfer,
+      });
+      await flushDom();
+
+      expect(rendered.fileTree.getItem('index.ts')).not.toBeNull();
+      expect(rendered.fileTree.getItem('src/index.ts')).toBeNull();
+    } finally {
+      rendered.cleanup();
+    }
+  });
+
+  test('columns mode hover-open navigates the hovered directory into the active pane', async () => {
+    const rendered = await renderFileTree({
+      dragAndDrop: { openOnDropDelay: 40 },
+      flattenEmptyDirectories: true,
+      paths: ['README.md', 'docs/guide.md', 'src/index.ts', 'src/lib/utils.ts'],
+      viewMode: 'columns',
+      initialVisibleRowCount: 180 / 30,
+    });
+
+    try {
+      expect(rendered.fileTree.getExplorerDirectoryPath()).toBe('');
+      const sourceButton = getItemButton(
+        rendered.shadowRoot,
+        rendered.dom,
+        'README.md'
+      );
+      const hoverTarget = getItemButton(
+        rendered.shadowRoot,
+        rendered.dom,
+        'src/'
+      );
+      const dataTransfer = createMockDataTransfer();
+      rendered.dom.window.document.elementFromPoint = () => hoverTarget;
+
+      dispatchDragEvent(sourceButton, rendered.dom, 'dragstart', {
+        dataTransfer,
+      });
+      await flushDom();
+      dispatchDragEvent(hoverTarget, rendered.dom, 'dragover', {
+        dataTransfer,
+      });
+      await flushDom();
+      expect(rendered.fileTree.getExplorerDirectoryPath()).toBe('');
+
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      await flushDom();
+      expect(rendered.fileTree.getExplorerDirectoryPath()).toBe('src/');
+
+      // The navigation remounted the dragged row into the root ancestor pane;
+      // ending the drag there exercises the side-pane dragend wiring.
+      const remountedSource = getItemButton(
+        rendered.shadowRoot,
+        rendered.dom,
+        'README.md'
+      );
+      dispatchDragEvent(remountedSource, rendered.dom, 'dragend', {
+        dataTransfer,
+      });
+      await flushDom();
+      expect(getDraggingPaths(rendered.shadowRoot)).toEqual([]);
+    } finally {
+      rendered.cleanup();
+    }
+  });
+
   test('onDropError reports collision failures without controlled mode', async () => {
     const errors: string[] = [];
     const rendered = await renderFileTree({
