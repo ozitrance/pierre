@@ -9,8 +9,8 @@ const options = {
   unsafeCSS: CustomScrollbarCSS,
 } as const;
 
-// The editor requires the token transformer, so enabling it in the server
-// render keeps hydration from rerendering the surface after the editor
+// Enabling the token transformer in the server render keeps the markup
+// editor-ready, so hydration does not rerender the surface when the editor
 // attaches. Mirrors `(diffs)/_edit/constants.ts`.
 const editableDemoOptions: FileOptions<undefined> = {
   theme: { dark: 'pierre-dark', light: 'pierre-light' },
@@ -860,6 +860,8 @@ const workerPool = getOrCreateWorkerPoolSingleton({
   poolOptions: { workerFactory },
   highlighterOptions: {
     theme: { dark: 'pierre-dark', light: 'pierre-light' },
+    // Optional: pool markup is then already editor-compatible, so entering
+    // edit mode skips a one-time re-render of the file.
     useTokenTransformer: true,
   },
 });
@@ -901,6 +903,8 @@ const file: FileContents = {
 const poolOptions = { workerFactory };
 const highlighterOptions = {
   theme: { dark: 'pierre-dark', light: 'pierre-light' },
+  // Optional: pool markup is then already editor-compatible, so entering
+  // edit mode skips a one-time re-render of the file.
   useTokenTransformer: true,
 } as const;
 
@@ -933,14 +937,22 @@ export const EDITOR_OPTIONS_TYPE: PreloadFileOptions<undefined> = {
     contents: `import type {
   DiffLineAnnotation,
   DiffsEditableComponent,
+  EditorChangeEvent,
   FileContents,
   LineAnnotation,
 } from '@pierre/diffs';
-import { Editor, type IStateStorage } from '@pierre/diffs/edit';
+import {
+  Editor,
+  type EditorKeymap,
+  type IStateStorage,
+} from '@pierre/diffs/edit';
 
 interface EditorOptions<LAnnotation> {
   // Max undo stack entries
   historyMaxEntries?: number;
+
+  // Custom keymap checked before the default map.
+  keymap?: EditorKeymap;
 
   // Preserve each File's document and item-local editor state between renders.
   // Requires every editable file to provide a unique, stable cacheKey.
@@ -989,9 +1001,11 @@ interface EditorOptions<LAnnotation> {
   // existing array reference.
   onChange?: (
     file: FileContents,
-    lineAnnotations?:
+    lineAnnotations:
       | LineAnnotation<LAnnotation>[]
       | DiffLineAnnotation<LAnnotation>[]
+      | undefined,
+    event: EditorChangeEvent<LAnnotation>
   ) => void;
 
   // Fires when the editable content area gains focus (tab, click, or editor.focus()).
@@ -1000,6 +1014,27 @@ interface EditorOptions<LAnnotation> {
   // Fires when the editable content area loses focus.
   onBlur?: () => void;
 }`,
+  },
+  options,
+};
+
+export const EDIT_ON_CHANGE_EXAMPLE: PreloadFileOptions<undefined> = {
+  file: {
+    name: 'editor_on_change.ts',
+    contents: `import { Editor } from '@pierre/diffs/edit';
+
+new Editor({
+  onChange: (file, lineAnnotations, event) => {
+    // \`event.changes\` is an array containing all edits.
+    const changes = event.changes;
+
+    changes.forEach((change) => {
+      console.log('Text inserted/replaced:', change.text);
+      console.log('Range of the edit:', change.range); // { start: { line, character }, end: { line, character } }
+      console.log('Offset of the change:', change.start, change.end);
+    });
+  },
+});`,
   },
   options,
 };

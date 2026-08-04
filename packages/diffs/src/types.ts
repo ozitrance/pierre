@@ -1033,6 +1033,11 @@ export interface DiffsEditableComponent<
 > extends DiffsBaseComponent {
   /** @internal Return the current file when this component renders one. */
   __getCurrentFile?: () => FileContents | undefined;
+  /**
+   * @internal Code options with worker-pool overrides applied: the theme the
+   * shared highlighter is actually loaded with and the pool's tokenize limit.
+   */
+  __getEffectiveCodeOptions(): BaseCodeOptions;
   /** @internal Keep the editor caret decoration separate from line selection. */
   setEditorActiveLine: (
     lineNumber: number | null,
@@ -1093,16 +1098,22 @@ export interface DiffsEditableComponent<
     newLineAnnotations?: DiffLineAnnotation<LAnnotation>[],
     shouldUpdateBuffer?: boolean
   ) => void;
-  /**
-   * `lineCountChangeInFlight` is true only during an edit pass whose line
-   * count changed, where an authoritative `applyDocumentChange` follows in
-   * the same pass; deferred background-tokenize passes always pass false.
-   */
   updateRenderCache: (
     lines: Map<number, Array<HighlightedToken>>,
     themeType: 'dark' | 'light',
-    shouldRefreshView: boolean,
-    lineCountChangeInFlight?: boolean
+    options?: {
+      /**
+       * Whether to refresh the diffs view.
+       * Deferred background-tokenize passes always pass false.
+       */
+      shouldRefreshDiffsView?: boolean;
+      /**
+       * Whether the line count has changed in flight.
+       * True only during an edit pass whose line count changed,
+       * deferred background-tokenize passes always pass false.
+       */
+      lineCountChangeInFlight?: boolean;
+    }
   ) => void;
 }
 
@@ -1210,6 +1221,31 @@ export interface TextEdit {
   readonly newText: string;
 }
 
+/** Different with `TextEdit`, the range has been resolved to offsets. */
+export interface ResolvedTextEdit {
+  /** The start offset of the text change. */
+  readonly start: number;
+  /** The end offset of the text change. */
+  readonly end: number;
+  /** The string to be inserted. For delete operations use an empty string. */
+  readonly text: string;
+}
+
+/** A normalized text change reported by the editor. */
+export interface EditorChange extends ResolvedTextEdit {
+  /** The replaced range in the document before the change. */
+  range: Range;
+}
+
+/** The document state and normalized edits reported after an editor change. */
+export interface EditorChangeEvent<LAnnotation> {
+  changes: EditorChange[];
+  file: FileContents;
+  lineAnnotations?:
+    | LineAnnotation<LAnnotation>[]
+    | DiffLineAnnotation<LAnnotation>[];
+}
+
 /**
  * The direction of a selection.
  * -1: backward
@@ -1249,8 +1285,10 @@ export interface DiffsTextDocument {
 export interface CodeViewCreateEditorOptions<LAnnotation> {
   onChange: (
     file: FileContents,
-    lineAnnotations?:
+    lineAnnotations:
       | LineAnnotation<LAnnotation>[]
       | DiffLineAnnotation<LAnnotation>[]
+      | undefined,
+    event: EditorChangeEvent<LAnnotation>
   ) => void;
 }

@@ -54,6 +54,9 @@ export function computeFileTreeRowClickPlan(
   // Explorer rows never expand in place: a single click selects, and only a
   // double click activates (navigate into a directory / open a file).
   return {
+    // A row click does not close an open search. The user can then refine the
+    // search and select results. Keep this field on the plan. It gives the
+    // close decision one place to change later.
     closeSearch: isSearchOpen && (!isExplorer || (event.detail ?? 1) >= 2),
     openTarget: isExplorer && !hasModifier && (event.detail ?? 1) >= 2,
     revealCanonical: mode === 'sticky',

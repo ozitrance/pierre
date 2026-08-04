@@ -100,7 +100,7 @@ describe('computeFileTreeRowClickPlan', () => {
     expect(plan.toggleDirectory).toBe(false);
   });
 
-  test('an open search closes on every click', () => {
+  test('an open search stays open on every click', () => {
     const plain = computeFileTreeRowClickPlan({
       ...baseInput,
       isSearchOpen: true,
@@ -110,8 +110,8 @@ describe('computeFileTreeRowClickPlan', () => {
       event: { ctrlKey: false, metaKey: false, shiftKey: true },
       isSearchOpen: true,
     });
-    expect(plain.closeSearch).toBe(true);
-    expect(shift.closeSearch).toBe(true);
+    expect(plain.closeSearch).toBe(false);
+    expect(shift.closeSearch).toBe(false);
   });
 
   test('sticky mode clicks ask the caller to reveal the canonical row', () => {

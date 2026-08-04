@@ -64,8 +64,9 @@ You render the surface first, then attach editing:
    another cursor without clearing existing ones.
 4. **Updates** — Keystrokes update an internal `TextDocument`, then changed
    lines are re-highlighted through the same tokenizer pipeline as read-only
-   mode. Your `onChange` handler receives updated `FileContents` (and line
-   annotations when present).
+   mode. Your `onChange` handler receives updated `FileContents`, optional
+   `lineAnnotations`, and an `EditorChangeEvent` as its third argument. The
+   event includes both values alongside normalized text `changes`.
 
 When attaching, edit mode turns on the token transformer and triggers a
 re-render if necessary. Collapsed unchanged regions stay collapsed: arrow keys
@@ -79,10 +80,10 @@ deleted lines and annotation lines remain read-only.
 
 Applications own the annotation collection passed to a `File`, `FileDiff`, or
 other editable surface. When an edit affects annotation coordinates, the editor
-remaps them and passes the complete current collection to `onChange` alongside
-the edited file. This collection is authoritative when present; it is not a
-delta. Replace your application-owned collection with it before a later render
-can reapply stale coordinates.
+remaps them and passes the complete current collection as `onChange`'s second
+argument alongside the edited file. This collection is authoritative when
+present; it is not a delta. Replace your application-owned collection with it
+before a later render can reapply stale coordinates.
 
 The editor preserves the existing array reference for ordinary same-line edits
 and other edits that do not affect any annotation. When a structural edit
@@ -116,7 +117,7 @@ ID in `metadata` and key application-owned drafts or UI state by that ID.
 
 The shared `onChange` callback accepts either annotation shape: standalone
 `File` surfaces emit `LineAnnotation[]`, while diff surfaces emit
-`DiffLineAnnotation[]`. Narrow the collection before reading the diff-only
+`DiffLineAnnotation[]`. Narrow `lineAnnotations` before reading the diff-only
 `side` property. Use `isFileAnnotationCollection` or
 `isDiffAnnotationCollection` when the surface type is not already known.
 
@@ -317,6 +318,21 @@ Pass these when constructing `new Editor({ ... })`, or update them later with
 
 <DocsCodeExample {...editorOptionsType} />
 
+`EditorKeymap` is an array of `{ platform?, bindings }` groups. `platform` can
+be `mac`, `windows`, or `linux`; omit it to enable the group's bindings
+everywhere. Later groups take precedence when bindings overlap. When set, custom
+bindings take precedence, while unmatched shortcuts fall back to the built-in
+keymap. Keymaps are immutable; pass a new array to `setOptions` to change one.
+
+#### `onChange`
+
+The third argument is an `EditorChangeEvent`. Its `changes` array contains every
+normalized edit in the change:
+
+<DocsCodeExample {...editOnChangeExample} />
+
+Ranges use zero-based line and character positions.
+
 #### Persisting file state
 
 State persistence is disabled by default. Set `persistState: true` to preserve
@@ -420,9 +436,16 @@ Limit the stack size with `historyMaxEntries` in
 
 ### Using Worker Pool
 
-When you offload syntax highlighting to a worker pool, edit mode still needs the
-token transformer pipeline to re-highlight lines as you type. Set
-`useTokenTransformer: true` on the pool's `highlighterOptions`.
+Edit mode works with a worker pool out of the box: a file being edited renders
+on the main thread with the token metadata the editor needs, while the pool
+keeps rendering every other file on the page. Keystroke re-highlighting always
+runs on the main thread, with or without a pool.
+
+Setting `useTokenTransformer: true` on the pool's `highlighterOptions` is an
+optional optimization for edit-heavy apps: pool-rendered markup is then already
+editor-compatible, so entering edit mode skips a one-time re-render of that
+file. It costs larger DOM for every rendered file, which is why it is off by
+default.
 
 See [Worker Pool](#worker-pool) for worker factory setup and pool options. In
 vanilla JS, pass the pool as the second argument to `File` or `FileDiff`. In
@@ -468,27 +491,4 @@ Shortcuts use <kbd>Cmd</kbd> on macOS and <kbd>Ctrl</kbd> on Windows and Linux.
 Jumping to the document start or end uses the modifier with the <kbd>Home</kbd>
 and <kbd>End</kbd> keys; on macOS, the modifier with ↑ and ↓ arrows works too.
 
-| Action                       | Shortcut                                                                      |
-| ---------------------------- | ----------------------------------------------------------------------------- |
-| Indent line or selection     | <Shortcut meta={false}>Tab</Shortcut>                                         |
-| Outdent line or selection    | <Shortcut meta={false} modifiers={['Shift']}>Tab</Shortcut>                   |
-| Move selected line(s) up     | <Shortcut meta={false} modifiers={['Alt']}>↑</Shortcut>                       |
-| Move selected line(s) down   | <Shortcut meta={false} modifiers={['Alt']}>↓</Shortcut>                       |
-| Move selected line(s) up     | <Shortcut meta={false} modifiers={['Alt', 'Ctrl']}>P</Shortcut> (macOS/Linux) |
-| Move selected line(s) down   | <Shortcut meta={false} modifiers={['Alt', 'Ctrl']}>N</Shortcut> (macOS/Linux) |
-| Cut                          | <Shortcut>X</Shortcut>                                                        |
-| Copy                         | <Shortcut>C</Shortcut>                                                        |
-| Paste                        | <Shortcut>V</Shortcut>                                                        |
-| Move the cursor              | <Shortcut meta={false}>↑ ↓ ← →</Shortcut>                                     |
-| Extend the selection         | <Shortcut meta={false} modifiers={['Shift']}>↑ ↓ ← →</Shortcut>               |
-| Jump to line start / end     | <Shortcut>← →</Shortcut>                                                      |
-| Jump to document start / end | <Shortcut>Home / End</Shortcut>                                               |
-| Add a cursor                 | <Shortcut>Click</Shortcut>                                                    |
-| Collapse to a single cursor  | <Shortcut meta={false}>Esc</Shortcut>                                         |
-| Select all                   | <Shortcut>A</Shortcut>                                                        |
-| Open the search panel        | <Shortcut>F</Shortcut>                                                        |
-| Go to next search match      | <Shortcut>G</Shortcut>                                                        |
-| Go to previous search match  | <Shortcut modifiers={['Shift']}>G</Shortcut>                                  |
-| Find next match of selection | <Shortcut>D</Shortcut>                                                        |
-| Undo                         | <Shortcut>Z</Shortcut>                                                        |
-| Redo                         | <Shortcut modifiers={['Shift']}>Z</Shortcut>                                  |
+<KeyboardShortcuts prerenderedFile={keymapFile} />
